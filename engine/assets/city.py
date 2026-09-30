@@ -527,6 +527,8 @@ def _place_buildings(rng, D, dmap, DR, river, smask):
         pu, pv = _PITCH[typ]
         if did == 0 and typ == T_CBD:
             pu, pv = 72.0, 72.0
+        if did == 1:
+            pu, pv = 52.0, 29.0              # the girl's estate: rows of slabs fitting its 176 m blocks
         uu = np.arange(np.floor(cu.min() / pu) * pu, cu.max(), pu)
         vv = np.arange(np.floor(cv.min() / pv) * pv, cv.max(), pv)
         U, V = np.meshgrid(uu, vv)
@@ -542,6 +544,8 @@ def _place_buildings(rng, D, dmap, DR, river, smask):
         if n == 0:
             continue
         a, b, fl, fh, bt = _gen_type(rng, typ, n)
+        if did == 1:
+            a = np.minimum(a, 21.5)
         keep = _lookup(dmap, C, DR) == did
         if 0 <= zone < 10:
             keep &= _core_zone(C) == zone
@@ -559,7 +563,11 @@ def _place_buildings(rng, D, dmap, DR, river, smask):
         keep &= np.hypot(C[:, 0] - SUBSTATION_POS[0], C[:, 1] - SUBSTATION_POS[2]) > 80
         keep &= r < CITY_R - 200
         for sx, sz, sa, sb, syaw, sfl, sfh, styp, tag in SPECIAL:
-            keep &= np.hypot(C[:, 0] - sx, C[:, 1] - sz) > (sa + a + 4.0) * 0.8 + 0 * sb
+            su_, sv_ = _dir(syaw), _perp(syaw)
+            du = np.abs((C[:, 0] - sx) * su_[0] + (C[:, 1] - sz) * su_[1])
+            dv = np.abs((C[:, 0] - sx) * sv_[0] + (C[:, 1] - sz) * sv_[1])
+            r_c = np.hypot(a, b)
+            keep &= ~((du < sa + r_c + 5.0) & (dv < sb + r_c * 0.5 + 9.0))
         idx = np.nonzero(keep)[0]
         if idx.size == 0:
             continue
@@ -1768,18 +1776,78 @@ def ground_mask(cam, W, H, far=12000.0):
     return (dy / dn < -max(cam.pos[1], 0.5) / far).astype(np.float32)
 
 
+_GIRL = {}
+
+
+def girl_cloud(**pose):
+    """The girl (figures.Girl) posed and placed on the water tank, world frame. Returns SolidCloud."""
+    from .figures import Girl
+    if "g" not in _GIRL:
+        _GIRL["g"] = Girl()
+    key = tuple(sorted(pose.items()))
+    if _GIRL.get("key") != key:
+        cl, info = _GIRL["g"].pose(**pose)
+        Rm = rooftop.yaw_matrix(ROOF_YAW)
+        _GIRL["cl"] = cl.transformed(Rm, GIRL_WORLD)
+        _GIRL["key"] = key
+    return _GIRL["cl"]
+
+
+def _solids(roof=True, near_=True):
+    from ..solid import SolidCloud
+    key = ("solids", roof, near_)
+    if key not in _L:
+        parts = []
+        if roof:
+            parts.append(roof_cloud())
+        if near_:
+            d = near()
+            parts.append(SolidCloud(d["P"], d["N"], d["alb"], area=d["area"]))
+        _L[key] = SolidCloud.concat(parts) if len(parts) > 1 else parts[0]
+    return _L[key]
+
+
+def draw_bulb(R, cam, zb, pw, energy=1.0):
+    if pw["lamp"] <= 0:
+        return
+    P = LAMP_WORLD[None]
+    x, y, z, coc, ok = cam.project(P)
+    if not (ok[0] and -50 < x[0] < cam.W + 50 and -50 < y[0] < cam.H + 50):
+        return
+    lv = pw["lamp"]
+    # filament afterglow is orange; a healthy bulb is warm white
+    col = BULB * lv + hex_lin("#FF7A20") * (1 - lv) * 0.5 * (lv > 0)
+    vis = bool(_ztest(zb, x, y, z, 0.02, 0.4)[0])
+    if vis:
+        R.draw(cam, P, col[None] * 9.0 * lv, size_px=1.6, energy=energy)
+        R.draw(cam, P, col[None] * 1.2 * lv, size_px=9.0, soft=True, energy=energy)
+    # the bulb's glow in the damp air (seen around the enclosure even when the bulb is hidden)
+    R.draw(cam, P, col[None] * 0.9 * lv, size=1.6, soft=True, energy=energy)
+    R.draw(cam, P, col[None] * 0.6 * lv, size=5.0, soft=True, energy=energy)
+
+
 def render_env(R, cam, tg, W, H, sky=True, stars=True, city=True, roof=True, girl=False, pw=None,
-               sky_energy=1.0, city_energy=1.0, star_energy=1.0):
+               sky_energy=1.0, city_energy=1.0, star_energy=1.0, solid_energy=1.0, girl_pose=None,
+               spacing_px=2.2):
     """Sky (glow dome / stars + Milky Way), the city and the rooftop set at global time tg.
 
     Returns (hdr, mask): mask = coverage of solid geometry (buildings, ground, rooftop set) so the
-    caller can put sky-only elements behind it and composite characters on top. R is left empty."""
+    caller can put sky-only elements behind it and composite characters on top. R is left empty.
+    girl=True draws the girl (figures.Girl, pose kwargs in girl_pose) seated on the tank."""
     import cv2
+    from ..solid import SolidCloud, draw_solid
     pw = pw or power(tg)
     R.new_layer()                                  # start clean
-    boxes = building_boxes(exclude_tag=(1,)) if city else np.zeros((0, 8))
-    zb = zbuffer(cam, boxes, W, H) if city else np.full((H, W), np.inf)
-    cover = np.maximum(np.isfinite(zb).astype(np.float32), ground_mask(cam, W, H) if city else 0.0)
+    parts = []
+    if city:
+        parts += [building_boxes(exclude_tag=(1,)), near()["boxes"]]
+    if roof:
+        parts.append(roof_boxes())
+    boxes = np.concatenate(parts) if parts else np.zeros((0, 8))
+    zb = zbuffer(cam, boxes, W, H) if len(boxes) else np.full((H, W), np.inf)
+    cover = np.isfinite(zb).astype(np.float32)
+    if city:
+        cover = np.maximum(cover, ground_mask(cam, W, H))
     soft_cover = np.clip(cv2.GaussianBlur(cover, (0, 0), 0.5) * 1.15, 0, 1)
     if sky:
         draw_sky(R, cam, pw, energy=sky_energy)
@@ -1791,7 +1859,23 @@ def render_env(R, cam, tg, W, H, sky=True, stars=True, city=True, roof=True, gir
         draw_windows(R, cam, zb, pw, energy=city_energy)
         draw_traffic(R, cam, zb, pw, energy=city_energy)
         draw_reflections(R, cam, zb, pw, energy=city_energy)
+    if roof or city:
+        draw_bulb(R, cam, zb, pw, energy=city_energy)
     city_img = R.new_layer()
     hdr = sky_img + city_img
     mask = soft_cover
+    if roof or city or girl:
+        parts = []
+        if roof or city:
+            parts.append(_solids(roof, city))
+        if girl:
+            parts.append(girl_cloud(**(girl_pose or {})))
+        cl = SolidCloud.concat(parts) if len(parts) > 1 else parts[0]
+        lights = env_lights(pw=pw)
+        m = draw_solid(R, cam, cl, lights, spacing_px=spacing_px, return_mask=True, energy=solid_energy,
+                       rim=(hex_lin("#FFB27A") * 0.02 * pw["glow"] + hex_lin("#8FA8FF") * 0.01 * pw["stars"], 3.0, 1.0),
+                       seurat=0.6, p_min=0.06, flecks=(hex_lin("#4A5A9A"), 0.05))
+        solid_img = R.new_layer()
+        hdr = hdr * (1.0 - m)[..., None] + solid_img
+        mask = np.maximum(mask, m)
     return hdr, mask
