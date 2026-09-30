@@ -99,7 +99,7 @@ class RedGiant:
         col = (self.core * 0.7 + self.hi * 0.3) * (energy * np.exp(-h / 0.05))[:, None]
         return P.astype(np.float32), col.astype(np.float32)
 
-    def prominences(self, t, center, R, n_per=2500, energy=1.2):
+    def prominences(self, t, center, R, n_per=2500, energy=1.2, cam=None):
         Ps, Cs = [], []
         C = np.asarray(center, float)
         for j, (a, b, hgt, ph) in enumerate(self.loops):
@@ -114,6 +114,15 @@ class RedGiant:
             P = C + (p + jit) * R
             fade = np.sin(np.pi * flow) ** 0.7
             col = (self.hi * 0.6 + self.core * 0.4) * (energy * fade)[:, None]
+            if cam is not None:
+                # keep only material seen off the limb (in front of the disk it would read as a smear)
+                v = P - cam.pos
+                v /= np.linalg.norm(v, axis=1, keepdims=True)
+                oc = C - cam.pos
+                tca = v @ oc
+                d2 = (oc @ oc) - tca ** 2
+                off = d2 > (R * 1.0) ** 2
+                P, col = P[off], col[off]
             Ps.append(P)
             Cs.append(col)
         return np.concatenate(Ps).astype(np.float32), np.concatenate(Cs).astype(np.float32)
@@ -134,19 +143,23 @@ class Planet:
         rings = 0.5 + 0.5 * np.cos(ang * 180.0 + idx)
         ridge = 1.0 - np.abs(fbm(N * 3.0, octaves=4))
         dens = np.clip(np.exp(-ang / 0.22) * (0.4 + 0.6 * rings) + 0.55 * ridge ** 6, 0, 1)
-        keep = rng.random(N.shape[0]) < dens
-        self.N = N[keep][:n_lights]
+        keep = np.nonzero(rng.random(N.shape[0]) < dens)[0]
+        rng.shuffle(keep)   # fib_sphere is ordered by latitude: never truncate before shuffling
+        self.N = N[keep[:n_lights]]
         self.b = (0.3 + 0.7 * rng.random(self.N.shape[0]) ** 2).astype(np.float32)
+        self.sub = rng.random(self.N.shape[0]).astype(np.float32)
         self.gold = hex_lin("#FFC46B")
         self.rim_col = hex_lin("#FF6A2A")
 
-    def lights(self, center, R, cam_pos, star_dir, on=1.0, energy=1.0, alt=1.002):
+    def lights(self, center, R, cam_pos, star_dir, on=1.0, energy=1.0, alt=1.002, frac=1.0):
         C = np.asarray(center, float)
         view = cam_pos - C
         view /= np.linalg.norm(view)
         mu = self.N @ view
         night = (self.N @ star_dir) < 0.08
         vis = (mu > 0.02) & night
+        if frac < 1.0:
+            vis &= self.sub < frac
         P = C + self.N[vis] * R * alt
         col = self.gold * (self.b[vis] * energy * on * (0.35 + 0.65 * mu[vis]))[:, None]
         return P.astype(np.float32), col.astype(np.float32), vis

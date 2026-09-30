@@ -150,15 +150,17 @@ def card_layers(W, H, card, t):
             a_en = np.zeros((H, W), np.float32)
             draw_line(a_en, card["en"], "garamond_it", 26, W / 2, yb + 46 * s, 0.02, "center", s)
             layers.append((a_en, "#B9B2A5", op))
-    elif style == "slug":
-        x = 96 * s
-        yb = H - 96 * s + drift
+    elif style in ("slug", "slug_r"):
+        right = style == "slug_r"
+        x = W - 96 * s if right else 96 * s
+        al = "right" if right else "left"
+        yb = H - 92 * s + drift
         a_cn = np.zeros((H, W), np.float32)
-        draw_line(a_cn, card["cn"], "serif", 24, x, yb - 34 * s, 0.10, "left", s)
-        layers.append((a_cn, "#D8D0C2", op))
+        draw_line(a_cn, card["cn"], "serif", 25, x, yb - 38 * s, 0.10, al, s)
+        layers.append((a_cn, "#DDD5C7", op))
         a_en = np.zeros((H, W), np.float32)
-        draw_line(a_en, card["en"], "garamond_it", 20, x, yb, 0.02, "left", s)
-        layers.append((a_en, "#A9A194", op))
+        draw_line(a_en, card["en"], "garamond_it", 22, x, yb, 0.02, al, s)
+        layers.append((a_en, "#B3AB9E", op))
     elif style == "museum":
         xr = W - 96 * s
         yb = H - 92 * s

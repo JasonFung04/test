@@ -45,23 +45,24 @@ PLANET_R = 5.0
 def I1(tl, tg, R, W, H):
     p = ease(tl / 7.0)
     cam = Camera(pos=(0.0, 0.0, 231.0 - 7.0 * p), target=(0.0, 0.0, 0.0), focal=35, W=W, H=H)
-    stars_layer(R, cam, field(), energy=0.8)
     g = giant()
     Rs = star_radius(tg)
+    stars_layer(R, cam, field(), energy=0.8)
+    bg = R.new_layer() * (1.0 - bodies.sphere_mask(cam, STAR_C, Rs * 1.004, W, H))[..., None]
     P, C = g.surface(tg, STAR_C, Rs, cam.pos, energy=2.6)
     R.draw(cam, P, C, size_px=1.1)
     P, C = g.corona(tg, STAR_C, Rs, cam.pos)
     R.draw(cam, P, C, size_px=3.0, soft=True)
-    P, C = g.prominences(tg, STAR_C, Rs)
+    P, C = g.prominences(tg, STAR_C, Rs, cam=cam)
     R.draw(cam, P, C, size_px=1.4, soft=True)
-    back = R.new_layer()
+    back = R.new_layer() + bg
     m = bodies.sphere_mask(cam, PLANET_C, PLANET_R, W, H)
     back *= (1.0 - m)[..., None]
     star_dir = STAR_C - PLANET_C
     star_dir /= np.linalg.norm(star_dir)
     pl = planet()
-    P, C, _ = pl.lights(PLANET_C, PLANET_R, cam.pos, star_dir, energy=0.9)
-    R.draw(cam, P, C, size_px=0.6)
+    P, C, _ = pl.lights(PLANET_C, PLANET_R, cam.pos, star_dir, energy=0.55, frac=0.035)
+    R.draw(cam, P, C, size_px=0.5)
     P, C = pl.rim(PLANET_C, PLANET_R, cam.pos, star_dir, energy=1.4)
     R.draw(cam, P, C, size_px=0.8, soft=True)
     return back + R.resolve(), Grade(**GRADE_I)
