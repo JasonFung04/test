@@ -230,6 +230,8 @@ def draw_solid(R, cam, cloud, lights, rim=None, spec=None, spacing_px=2.2, backf
         rad = np.clip(spacing_now * 0.9, 1, 12).astype(np.int32)
         vis = visibility(xs, ys, zs, W, H, rad)
         idx, xs, ys, zs = idx[vis], xs[vis], ys[vis], zs[vis]
+    if idx.size == 0:
+        return np.zeros((H, W), np.float32) if return_mask else None
     sub = cloud.subset(idx)
     rad_out = shade(sub, cam.pos, lights, rim, spec)
     # energy = radiance * projected area of the patch this dot stands for

@@ -136,8 +136,8 @@ _DISTRICTS_FIXED = [
     (ROOF_ORIGIN[0], ROOF_ORIGIN[2], -8.0, T_OLD, 176.0, 150.0),   # the girl's 1990s housing estate (grid on her block)
     (-3400.0, -600.0, 24.0, T_MIX, 150.0, 170.0),       # west of the core
     (4600.0, -900.0, 31.0, T_NEW, 230.0, 210.0),        # east bank: new high-rise compounds
-    (3900.0, 1900.0, 18.0, T_CBD, 150.0, 150.0),        # east-bank secondary CBD at the river bend
-    (600.0, 2600.0, -14.0, T_MIX, 160.0, 150.0),        # south of the core, north of the bend
+    (3900.0, 1900.0, 18.0, T_NEW, 190.0, 170.0),        # east bank at the bend
+    (700.0, 2350.0, -14.0, T_CBD, 150.0, 140.0),        # supertall cluster inside the river bend
     (-2200.0, 2900.0, 9.0, T_OLD, 170.0, 150.0),
     (2600.0, -3600.0, -21.0, T_OLD, 170.0, 160.0),
     (-2600.0, -3400.0, 14.0, T_NEW, 220.0, 200.0),
@@ -301,7 +301,7 @@ def _core_zone(xz):
     """Building mix inside the core: 0 old residential, 1 mixed mid-rise, 2 CBD towers."""
     u = xz[:, 0] / SCALE
     v = -xz[:, 1] / SCALE
-    cbd = ((u + 0.14) / 0.46) ** 2 + ((v - 0.06) / 0.30) ** 2 < 1.0
+    cbd = ((u + 0.14) / 0.40) ** 2 + ((v - 0.04) / 0.26) ** 2 < 1.0
     n = fbm(np.stack([u * 4.0, v * 4.0, np.full_like(u, 2.0)], 1), octaves=2)
     z = np.where(n > 0.05, 1, 0)
     return np.where(cbd, 2, z)
@@ -469,9 +469,9 @@ def _gen_type(rng, typ, n):
         fh = np.full(n, 3.0)
         bt = np.full(n, T_NEW)
     elif typ == T_CBD:
-        a = rng.uniform(15, 30, n)
-        b = rng.uniform(15, 28, n)
-        fl = (rng.pareto(1.5, n) * 12 + 16).astype(int).clip(10, 72)
+        a = rng.uniform(12, 22, n)
+        b = rng.uniform(12, 20, n)
+        fl = (rng.pareto(1.5, n) * 10 + 16).astype(int).clip(10, 62)
         fh = np.full(n, 4.0)
         bt = np.full(n, T_CBD)
     elif typ == T_MIX:
@@ -495,7 +495,7 @@ def _gen_type(rng, typ, n):
     return a, b, fl, fh, bt
 
 
-_PITCH = {T_OLD: (58.0, 29.0), T_NEW: (52.0, 58.0), T_CBD: (82.0, 82.0), T_MIX: (44.0, 36.0),
+_PITCH = {T_OLD: (58.0, 29.0), T_NEW: (52.0, 58.0), T_CBD: (56.0, 56.0), T_MIX: (44.0, 36.0),
           T_IND: (130.0, 90.0), T_SUB: (60.0, 55.0)}
 
 
@@ -504,7 +504,12 @@ def _place_buildings(rng, D, dmap, DR, river, smask):
     height, type.  Candidates on a jittered lattice per district, rejected where they touch streets,
     water, parks or leave their district."""
     recs = []
-    jobs = [(0, T_OLD, 0), (0, T_MIX, 1), (0, T_CBD, 2)] + [(k + 1, int(D[k, 3]), -1) for k in range(len(D))]
+    jobs = [(0, T_OLD, 0), (0, T_MIX, 1), (0, T_CBD, 2)]
+    for k in range(len(D)):
+        if int(D[k, 3]) == T_CBD:
+            jobs += [(k + 1, T_CBD, 10), (k + 1, T_MIX, 11)]
+        else:
+            jobs.append((k + 1, int(D[k, 3]), -1))
     gpos = lambda i: (i + 0.5) * DR - CITY_R
     for did, typ, zone in jobs:
         cells = np.nonzero(dmap == did)
@@ -520,6 +525,8 @@ def _place_buildings(rng, D, dmap, DR, river, smask):
         corners = np.array([[xmin, zmin], [xmax, zmin], [xmin, zmax], [xmax, zmax]]) - [x0, z0]
         cu, cv = corners @ eu, corners @ ev
         pu, pv = _PITCH[typ]
+        if did == 0 and typ == T_CBD:
+            pu, pv = 72.0, 72.0
         uu = np.arange(np.floor(cu.min() / pu) * pu, cu.max(), pu)
         vv = np.arange(np.floor(cv.min() / pv) * pv, cv.max(), pv)
         U, V = np.meshgrid(uu, vv)
@@ -536,8 +543,12 @@ def _place_buildings(rng, D, dmap, DR, river, smask):
             continue
         a, b, fl, fh, bt = _gen_type(rng, typ, n)
         keep = _lookup(dmap, C, DR) == did
-        if zone >= 0:
+        if 0 <= zone < 10:
             keep &= _core_zone(C) == zone
+        elif zone >= 10:
+            dd = np.hypot(C[:, 0] - x0, C[:, 1] - z0) + fbm(np.stack([C[:, 0], C[:, 1], np.zeros(n)], 1) * 0.004,
+                                                           octaves=2) * 250.0
+            keep &= (dd < 850.0) if zone == 10 else (dd >= 850.0)
         r = np.hypot(C[:, 0], C[:, 1])
         dens = np.clip(1.25 - (r - 6500) / 7000, 0.12, 1.0)
         keep &= rng.random(n) < dens
@@ -552,6 +563,15 @@ def _place_buildings(rng, D, dmap, DR, river, smask):
         idx = np.nonzero(keep)[0]
         if idx.size == 0:
             continue
+        if typ == T_CBD and did == 0:
+            # the old core: a modest mid-rise office cluster (the skyline belongs to the river bend)
+            fl[idx] = np.clip((fl[idx] * 0.55).astype(int), 9, 34)
+        if typ == T_CBD:
+            ctr = np.array([-0.14 * SCALE, -0.06 * SCALE]) if did == 0 else np.array([x0, z0])
+            tall = [38, 35, 33] if did == 0 else [118, 102, 90, 76, 70, 66]
+            order = idx[np.argsort(np.hypot(C[idx, 0] - ctr[0], C[idx, 1] - ctr[1]))]
+            for j, f in zip(order, tall):
+                fl[j] = f
         recs.append(dict(x=C[idx, 0], z=C[idx, 1], a=a[idx], b=b[idx], yaw=np.full(idx.size, th),
                          fl=fl[idx].astype(np.int16), fh=fh[idx], typ=bt[idx].astype(np.int8),
                          dist=np.full(idx.size, did, np.int16), tag=np.zeros(idx.size, np.int8)))
@@ -571,3 +591,1207 @@ def layout():
     if "lay" not in _L:
         _L["lay"] = _cached("layout", _build_layout)
     return _L["lay"]
+
+
+# ================================================================================================ rings
+_RING = {}
+
+
+def ring_dist(xz):
+    """Noisy distance from the substation (m) -> sets the blackout ring of anything at xz (N,2)."""
+    xz = np.asarray(xz, np.float64)
+    d = np.hypot(xz[:, 0] - SUBSTATION_POS[0], xz[:, 1] - SUBSTATION_POS[2])
+    q = np.stack([xz[:, 0] * 0.0021, xz[:, 1] * 0.0021, np.full(len(xz), 5.0)], 1)
+    n = fbm(q, octaves=3)
+    return d * (1.0 + 0.30 * n) + 25.0 * fbm(q * 6.0, octaves=2)
+
+
+def ring_of(xz):
+    return np.clip(np.searchsorted(RING_R, ring_dist(xz), side="right") - 1, 0, N_RING - 1).astype(np.uint8)
+
+
+def _ringmap():
+    """20 m raster of ring_dist for fast per-frame lookups (cars, haze, sky)."""
+    if "map" not in _RING:
+        def make():
+            DR = 20.0
+            ND = int(2 * CITY_R / DR)
+            g = (np.arange(ND) + 0.5) * DR - CITY_R
+            gx, gz = np.meshgrid(g, g)
+            return dict(rd=ring_dist(np.stack([gx.ravel(), gz.ravel()], 1)).reshape(ND, ND).astype(np.float32))
+        _RING["map"] = _cached("ringmap", make)["rd"]
+    return _RING["map"]
+
+
+def ring_fast(xz):
+    rd = _lookup(_ringmap(), np.asarray(xz), 20.0)
+    return np.clip(np.searchsorted(RING_R, rd, side="right") - 1, 0, N_RING - 1).astype(np.int64), rd
+
+
+# ================================================================================================ lights
+# window-set kinds
+K_WIN, K_SHOP, K_STAIR, K_CROWN, K_AVI, K_EMERG, K_FLICK, K_YARD = range(8)
+# lamp-set kinds
+L_STREET, L_EXPR, L_BRIDGE, L_BANK, L_PARK, L_DECO = range(6)
+
+TILE = 500.0
+NT = int(2 * CITY_R / TILE)
+
+
+def _tile_of(xz):
+    i = np.clip(((xz[:, 1] + CITY_R) / TILE).astype(np.int64), 0, NT - 1)
+    j = np.clip(((xz[:, 0] + CITY_R) / TILE).astype(np.int64), 0, NT - 1)
+    return i * NT + j
+
+
+def _h1(i, seed):
+    return float(hash01(np.array([i]), seed)[0])
+
+
+def _ncode(nx, nz):
+    ang = np.mod(np.arctan2(nz, nx), 2 * np.pi)
+    return np.round(ang / (2 * np.pi) * 254).astype(np.int64) % 254
+
+
+def _bb(T, desat=0.25):
+    c = blackbody(T)
+    lum = c @ np.array([0.2126, 0.7152, 0.0722])
+    return c + (lum[..., None] - c) * desat
+
+
+def _resample(poly, pitch, offset=0.0):
+    """Points every `pitch` m along a polyline (n,2); returns pts (m,2), tangents (m,2)."""
+    d = np.linalg.norm(np.diff(poly, axis=0), axis=1)
+    s = np.concatenate([[0], np.cumsum(d)])
+    if s[-1] < pitch * 0.5:
+        return np.zeros((0, 2)), np.zeros((0, 2))
+    ss = np.arange(offset % pitch, s[-1], pitch)
+    x = np.interp(ss, s, poly[:, 0])
+    z = np.interp(ss, s, poly[:, 1])
+    x2 = np.interp(np.minimum(ss + 2.0, s[-1]), s, poly[:, 0]) - np.interp(np.maximum(ss - 2.0, 0), s, poly[:, 0])
+    z2 = np.interp(np.minimum(ss + 2.0, s[-1]), s, poly[:, 1]) - np.interp(np.maximum(ss - 2.0, 0), s, poly[:, 1])
+    t = np.stack([x2, z2], 1)
+    t /= np.linalg.norm(t, axis=1, keepdims=True) + 1e-9
+    return np.stack([x, z], 1), t
+
+
+def _polys(L, pre):
+    pts, ln = L[pre + "_pts"], L[pre + "_len"]
+    off = np.concatenate([[0], np.cumsum(ln)])
+    return [pts[off[i]:off[i + 1]].astype(np.float64) for i in range(len(ln))]
+
+
+SODIUM = hex_lin("#FF9F3A")
+LED = hex_lin("#EAF2FF")
+WARM_LED = hex_lin("#FFE3B8")
+
+
+def _build_lamps():
+    L = layout()
+    rng = np.random.default_rng(11)
+    P, E, K, H = [], [], [], []
+
+    def add(xz, y, col, kind, pool_h):
+        n = len(xz)
+        if n == 0:
+            return
+        P.append(np.stack([xz[:, 0], np.broadcast_to(y, n), xz[:, 1]], 1))
+        E.append(np.broadcast_to(np.asarray(col, np.float64), (n, 3)) * (0.8 + 0.4 * rng.random(n))[:, None])
+        K.append(np.full(n, kind, np.uint8))
+        H.append(np.broadcast_to(np.asarray(pool_h, np.float64), (n,)))
+
+    D = L["dist"]
+    led_frac = {T_OLD: 0.15, T_NEW: 0.55, T_CBD: 0.8, T_MIX: 0.35, T_IND: 0.25, T_SUB: 0.4}
+    polys = _polys(L, "st")
+    for i, poly in enumerate(polys):
+        cls = int(L["st_cls"][i])
+        dd = int(L["st_dist"][i])
+        typ = T_MIX if dd == 0 else int(D[dd - 1, 3])
+        if cls == 0:
+            pitch, hh, inten, sides = 20.0, 11.0, 1.0, (-23.0, 23.0, 0.0)
+            col = SODIUM
+        elif cls == 1:
+            pitch, hh, inten, sides = 30.0, 10.0, 0.62, (-14.0, 14.0)
+            col = LED if _h1(i, 5) < led_frac.get(typ, 0.3) else SODIUM
+        elif cls == 2:
+            pitch, hh, inten, sides = 34.0, 8.0, 0.30, (-7.0, 7.0)
+            col = LED * 0.9 if _h1(i, 6) < led_frac.get(typ, 0.3) else SODIUM
+        elif cls == 5:
+            pitch, hh, inten, sides = 24.0, 3.5, 0.10, (1.5,)
+            col = hex_lin("#FFE2B0")
+        else:
+            continue
+        for k, sd in enumerate(sides):
+            pts, t = _resample(poly, pitch, offset=(pitch * 0.5 * k + 7 * i) % pitch)
+            if len(pts) == 0:
+                continue
+            nrm = np.stack([-t[:, 1], t[:, 0]], 1)
+            xz = pts + nrm * sd
+            add(xz, hh, col * inten * (0.8 if sd == 0.0 else 1.0), L_PARK if cls == 5 else L_STREET,
+                hh if cls != 5 else 0.0)
+    # expressways + bridges (on their decks)
+    polys = _polys(L, "ex")
+    for i, poly in enumerate(polys):
+        hdeck = float(L["ex_h"][i])
+        br = bool(L["ex_bridge"][i])
+        pts, t = _resample(poly, 30.0 if not br else 24.0)
+        nrm = np.stack([-t[:, 1], t[:, 0]], 1)
+        col = (LED if i % 2 == 0 else SODIUM) if not br else hex_lin("#F4F0FF")
+        for sd in (-12.0, 12.0) if not br else (-13.0, 13.0):
+            add(pts + nrm * sd, hdeck + 9.0, col * (0.62 if not br else 0.7), L_BRIDGE if br else L_EXPR, 9.0)
+        if br:
+            # decorative railing lights (dense, dim), both sides
+            pts2, t2 = _resample(poly, 4.0)
+            n2 = np.stack([-t2[:, 1], t2[:, 0]], 1)
+            for sd in (-14.5, 14.5):
+                add(pts2 + n2 * sd, hdeck + 1.2, hex_lin("#9FD8FF") * 0.05, L_DECO, 0.0)
+    # river promenades (reflecting)
+    RC, RH = L["river_c"].astype(np.float64), L["river_hw"].astype(np.float64)
+    pts, t = _resample(RC, 22.0)
+    hw = np.interp(np.arange(len(pts)), np.linspace(0, len(pts) - 1, len(RH)), RH)
+    nrm = np.stack([-t[:, 1], t[:, 0]], 1)
+    for sg in (-1.0, 1.0):
+        xz = pts + nrm * (sg * (hw + 14.0))[:, None]
+        ok = np.hypot(xz[:, 0], xz[:, 1]) < CITY_R - 600
+        add(xz[ok], 4.5, hex_lin("#FFD9A0") * 0.22, L_BANK, 0.0)
+    # lake shore in the park
+    th = np.linspace(0, 2 * np.pi, 70, endpoint=False)
+    c = np.stack([1.04 + 0.087 * 1.2 * np.cos(th), -0.47 + 0.087 * 0.75 * np.sin(th)], 1)
+    add(canon_to_world(c)[:, [0, 2]], 3.0, hex_lin("#FFE2B0") * 0.10, L_BANK, 0.0)
+    P = np.concatenate(P)
+    ring = ring_of(P[:, [0, 2]])
+    return dict(P=P.astype(np.float32), E=np.concatenate(E).astype(np.float32), kind=np.concatenate(K),
+                pool=np.concatenate(H).astype(np.float32), ring=ring)
+
+
+def _build_windows():
+    L = layout()
+    rng = np.random.default_rng(12)
+    x, z, a, b, yaw = [L["b_" + k].astype(np.float64) for k in ("x", "z", "a", "b", "yaw")]
+    fl, fh, typ, tag = L["b_fl"].astype(np.int64), L["b_fh"].astype(np.float64), L["b_typ"], L["b_tag"]
+    nb = len(x)
+    r = np.hypot(x, z)
+    eu = np.stack([np.cos(yaw), -np.sin(yaw)], 1)
+    ev = np.stack([-np.sin(yaw), -np.cos(yaw)], 1)
+    pitch = np.select([typ == T_OLD, typ == T_NEW, typ == T_CBD, typ == T_IND], [3.6, 3.5, 3.2, 10.0], 3.7)
+    p_lit = np.select([typ == T_OLD, typ == T_NEW, typ == T_CBD, typ == T_IND], [0.36, 0.33, 0.40, 0.12], 0.30)
+    p_lit = p_lit * (0.7 + 0.6 * rng.random(nb)) * np.clip(1.15 - r / 30000.0, 0.6, 1.0)
+    warm = np.select([typ == T_OLD, typ == T_NEW, typ == T_CBD, typ == T_IND], [0.78, 0.62, 0.22, 0.3], 0.6)
+    # emergency buildings (hospital generators) seen from the rooftop, bearing ~195 / ~168 deg
+    emerg = np.zeros(nb, bool)
+    for brg, dist in ((196.0, 4300.0), (171.0, 6200.0)):
+        tgt = np.array([ROOF_ORIGIN[0] + dist * np.sin(np.radians(brg)), ROOF_ORIGIN[2] - dist * np.cos(np.radians(brg))])
+        cand = np.nonzero((fl >= 8) & (fl <= 20))[0]
+        j = cand[np.argmin(np.hypot(x[cand] - tgt[0], z[cand] - tgt[1]))]
+        emerg[j] = True
+        p_lit[j] = 0.75
+    Ps, Es, Ns, Ks, Bs = [], [], [], [], []
+    # facades: 0 +ev, 1 -ev, 2 +eu, 3 -eu
+    for f in range(4):
+        n_vec = [ev, -ev, eu, -eu][f]
+        t_vec = [eu, -eu, -ev, ev][f]
+        half_n = [b, b, a, a][f]
+        length = 2 * [a, a, b, b][f]
+        ncol = np.maximum(1, np.floor(length / pitch)).astype(np.int64)
+        if f >= 2:
+            # slab ends: a single column of small windows (often none)
+            slab = typ == T_OLD
+            ncol = np.where(slab, (rng.random(nb) < 0.5).astype(np.int64), ncol)
+        slots = ncol * fl
+        B0 = 0
+        CH = 6000
+        for c0 in range(0, nb, CH):
+            sl = slice(c0, min(nb, c0 + CH))
+            ns = slots[sl]
+            tot = int(ns.sum())
+            if tot == 0:
+                continue
+            bi = np.repeat(np.arange(sl.start, sl.stop), ns)
+            first = np.repeat(np.cumsum(ns) - ns, ns)
+            k = np.arange(tot) - first                   # slot index inside the building facade
+            colj = k % ncol[bi]
+            floor = k // ncol[bi]
+            gid = bi * 131071 + f * 7919 + k * 3
+            u = hash01(gid, 21)
+            office = typ[bi] == T_CBD
+            floor_on = hash01(bi * 977 + floor * 13 + f, 22) < np.where(office, 0.62, 1.0)
+            lit = (u < p_lit[bi] * np.where(office, 1.35, 1.0)) & floor_on
+            lit |= (floor == 0) & (typ[bi] != T_CBD) & (u < 0.30)          # ground-floor shops / lobbies
+            idx = np.nonzero(lit)[0]
+            if idx.size == 0:
+                continue
+            bi, colj, floor, u, office = bi[idx], colj[idx], floor[idx], u[idx], office[idx]
+            nc = ncol[bi]
+            w = length[bi] / nc
+            off_t = (colj - (nc - 1) * 0.5) * w
+            jit = (hash01(gid[idx], 23) - 0.5) * w * 0.25
+            y = (floor + 0.55) * fh[bi] + (hash01(gid[idx], 24) - 0.5) * 0.3
+            c = np.stack([x[bi], z[bi]], 1)
+            xz = c + n_vec[bi] * (half_n[bi] + 0.3)[:, None] + t_vec[bi] * (off_t + jit)[:, None]
+            Ps.append(np.stack([xz[:, 0], y, xz[:, 1]], 1).astype(np.float32))
+            # colour: warm incandescent / cool LED-fluorescent, curtains dim some
+            h2 = hash01(gid[idx], 25)
+            iswarm = h2 < warm[bi]
+            T = np.where(iswarm, 2500 + 900 * hash01(gid[idx], 26), 4200 + 2600 * hash01(gid[idx], 27))
+            col = _bb(T, 0.35 if not True else 0.30)
+            inten = 0.35 + 0.9 * hash01(gid[idx], 28) ** 2
+            kind = np.full(idx.size, K_WIN, np.uint8)
+            shop = (floor == 0) & (typ[bi] != T_CBD)
+            if shop.any():
+                hs = hash01(gid[idx][shop], 29)
+                pal = np.array([hex_lin(h) for h in ("#FF3B5C", "#FFB23A", "#3AE0FF", "#FF5AE0", "#FFF2D0",
+                                                     "#7CFF8A", "#FF7A3A", "#EAF2FF")])
+                col[shop] = pal[(hs * len(pal)).astype(int) % len(pal)]
+                inten[shop] = 1.1 + 1.2 * hash01(gid[idx][shop], 30)
+                kind[shop] = K_SHOP
+            fk = hash01(gid[idx], 31) < 0.02
+            kind[fk & ~shop] = K_FLICK
+            em = emerg[bi]
+            kind[em] = K_EMERG
+            Es.append((col * inten[:, None] * np.where(office, 0.8, 1.0)[:, None]).astype(np.float32))
+            Ns.append(np.full(idx.size, _ncode(n_vec[bi[0], 0], n_vec[bi[0], 1]), np.int64) if False else
+                      _ncode(n_vec[bi, 0], n_vec[bi, 1]))
+            Ks.append(kind)
+            Bs.append(bi.astype(np.int32))
+    # stairwell lights (voice-activated) on the north face of old slabs: one column per ~25 m
+    old = np.nonzero(typ == T_OLD)[0]
+    nst = np.maximum(1, np.round(2 * a[old] / 25.0)).astype(np.int64)
+    tot = nst * fl[old]
+    bi = np.repeat(old, tot)
+    first = np.repeat(np.cumsum(tot) - tot, tot)
+    k = np.arange(int(tot.sum())) - first
+    sc = k % np.repeat(nst, tot)
+    floor = k // np.repeat(nst, tot)
+    off_t = (sc - (np.repeat(nst, tot) - 1) * 0.5) * (2 * a[bi] / np.repeat(nst, tot))
+    c = np.stack([x[bi], z[bi]], 1)
+    xz = c + ev[bi] * (b[bi] + 0.3)[:, None] + eu[bi] * off_t[:, None]
+    y = (floor + 0.5) * 3.0 + 1.5
+    Ps.append(np.stack([xz[:, 0], y, xz[:, 1]], 1).astype(np.float32))
+    Es.append((np.broadcast_to(_bb(np.array(3000.0), 0.2), (len(bi), 3)) * 0.35).astype(np.float32))
+    Ns.append(_ncode(ev[bi, 0], ev[bi, 1]))
+    Ks.append(np.full(len(bi), K_STAIR, np.uint8))
+    Bs.append(bi.astype(np.int32))
+    # crowns + aviation lights on tall buildings
+    tall = np.nonzero(fl * fh > 95.0)[0]
+    for j in tall:
+        top = fl[j] * fh[j]
+        cxz = np.array([x[j], z[j]])
+        corners = np.array([cxz + sa * a[j] * eu[j] + sb * b[j] * ev[j] for sa, sb in ((1, 1), (1, -1), (-1, -1), (-1, 1))])
+        # aviation: red, at the corners of the roof (+ mid-height pairs on supertalls)
+        av = [np.c_[corners[:, 0], np.full(4, top + 1.5), corners[:, 1]]]
+        if top > 250:
+            av.append(np.c_[corners[::2, 0], np.full(2, top * 0.5), corners[::2, 1]])
+        av = np.concatenate(av)
+        Ps.append(av.astype(np.float32))
+        Es.append(np.broadcast_to(hex_lin("#FF2A1A") * 2.2, (len(av), 3)).astype(np.float32))
+        Ns.append(np.full(len(av), 255))
+        Ks.append(np.full(len(av), K_AVI, np.uint8))
+        Bs.append(np.full(len(av), j, np.int32))
+        if top > 150 or _h1(j, 40) < 0.25:
+            # LED crown: dense points along the roof perimeter (+ a second band for supertalls)
+            per = np.concatenate([np.linspace(corners[q], corners[(q + 1) % 4], int(np.linalg.norm(corners[q] - corners[(q + 1) % 4]) / 1.6), endpoint=False) for q in range(4)])
+            ys = [top - 0.5] + ([top - 12.0] if top > 250 else [])
+            hc = _h1(j, 41)
+            ccol = hex_lin("#EAF2FF") if hc < 0.5 else (hex_lin("#FFD9A0") if hc < 0.8 else hex_lin("#7FE3FF"))
+            for yy in ys:
+                Ps.append(np.c_[per[:, 0], np.full(len(per), yy), per[:, 1]].astype(np.float32))
+                Es.append(np.broadcast_to(ccol * 0.28, (len(per), 3)).astype(np.float32))
+                Ns.append(np.full(len(per), 255))
+                Ks.append(np.full(len(per), K_CROWN, np.uint8))
+                Bs.append(np.full(len(per), j, np.int32))
+    # substation yard floodlights
+    th = np.linspace(0, 2 * np.pi, 9, endpoint=False)
+    yard = np.c_[SUBSTATION_POS[0] + 38 * np.cos(th), np.full(9, 9.0), SUBSTATION_POS[2] + 30 * np.sin(th)]
+    Ps.append(yard.astype(np.float32))
+    Es.append(np.broadcast_to(SODIUM * 1.4, (9, 3)).astype(np.float32))
+    Ns.append(np.full(9, 255))
+    Ks.append(np.full(9, K_YARD, np.uint8))
+    Bs.append(np.full(9, -1, np.int32))
+    P = np.concatenate(Ps)
+    E = np.concatenate(Es)
+    Nc = np.concatenate(Ns).astype(np.uint8)
+    K = np.concatenate(Ks)
+    Bi = np.concatenate(Bs)
+    # ring: per building (whole block switches together), yard/specials by position
+    bring = ring_of(np.stack([x, z], 1))
+    ring = np.where(Bi >= 0, bring[np.maximum(Bi, 0)], ring_of(P[:, [0, 2]])).astype(np.uint8)
+    # sort by tile, then by a random key (LOD = prefix of each tile)
+    tile = _tile_of(P[:, [0, 2]].astype(np.float64))
+    key = hash01(np.arange(len(P)), 33)
+    order = np.lexsort((key, tile))
+    tile = tile[order]
+    starts = np.searchsorted(tile, np.arange(NT * NT + 1))
+    return dict(P=P[order], E=E[order].astype(np.float16), nrm=Nc[order], kind=K[order], ring=ring[order],
+                bid=Bi[order], tile_start=starts.astype(np.int64))
+
+
+def lamps():
+    if "lamps" not in _L:
+        _L["lamps"] = _cached("lamps", _build_lamps)
+    return _L["lamps"]
+
+
+def windows():
+    if "win" not in _L:
+        _L["win"] = _cached("windows", _build_windows)
+    return _L["win"]
+
+
+# ================================================================================================ traffic
+def _build_traffic():
+    L = layout()
+    rng = np.random.default_rng(13)
+    lane_pts, lane_len, cars_lane, cars_s, cars_v = [], [], [], [], []
+    spec = {0: ((5.0, 8.5, 12.0), 20.0, 11.0), 1: ((4.0, 7.5), 38.0, 10.0), 2: ((3.0,), 190.0, 7.0)}
+
+    def add_lane(pts2, y, gap, v):
+        d = np.linalg.norm(np.diff(pts2, axis=0), axis=1)
+        Ls = float(d.sum())
+        if Ls < 60:
+            return
+        li = len(lane_len)
+        lane_pts.append(np.c_[pts2[:, 0], np.broadcast_to(y, len(pts2)), pts2[:, 1]])
+        lane_len.append(Ls)
+        n = rng.poisson(Ls / gap)
+        if n == 0:
+            return
+        cars_lane.append(np.full(n, li, np.int32))
+        cars_s.append(rng.random(n) * Ls)
+        cars_v.append(v * rng.uniform(0.75, 1.2, n))
+
+    polys = _polys(L, "st")
+    for i, poly in enumerate(polys):
+        cls = int(L["st_cls"][i])
+        if cls not in spec:
+            continue
+        offs, gap, v = spec[cls]
+        pts, t = _resample(poly, 10.0)
+        if len(pts) < 3:
+            continue
+        nrm = np.stack([-t[:, 1], t[:, 0]], 1)
+        for o in offs:
+            add_lane(pts + nrm * o, 0.8, gap, v)                    # forward lanes (right-hand traffic)
+            add_lane((pts - nrm * o)[::-1], 0.8, gap, v)            # opposite direction
+    polys = _polys(L, "ex")
+    for i, poly in enumerate(polys):
+        br = bool(L["ex_bridge"][i])
+        hdeck = float(L["ex_h"][i])
+        pts, t = _resample(poly, 10.0)
+        nrm = np.stack([-t[:, 1], t[:, 0]], 1)
+        offs, gap, v = ((3.5, 7.0, 10.5), 24.0, 17.0) if not br else ((4.0, 8.0), 30.0, 10.0)
+        for o in offs:
+            add_lane(pts + nrm * o, hdeck + 0.8, gap, v)
+            add_lane((pts - nrm * o)[::-1], hdeck + 0.8, gap, v)
+    # concatenate with a global arclength (lanes separated by 5 m gaps)
+    cum, start = [], []
+    s0 = 0.0
+    for p in lane_pts:
+        d = np.concatenate([[0], np.cumsum(np.linalg.norm(np.diff(p[:, [0, 2]], axis=0), axis=1))])
+        start.append(s0)
+        cum.append(d + s0)
+        s0 += d[-1] + 5.0
+    return dict(pts=np.concatenate(lane_pts).astype(np.float32), cum=np.concatenate(cum),
+                start=np.array(start), length=np.array(lane_len),
+                car_lane=np.concatenate(cars_lane), car_s=np.concatenate(cars_s).astype(np.float32),
+                car_v=np.concatenate(cars_v).astype(np.float32))
+
+
+def traffic():
+    if "traffic" not in _L:
+        _L["traffic"] = _cached("traffic", _build_traffic)
+    return _L["traffic"]
+
+
+def cars_at(tg):
+    """Car positions (N,3) and unit driving directions (N,3) at global time tg."""
+    T = traffic()
+    ln = T["car_lane"]
+    Ls = T["length"][ln]
+    s = np.mod(T["car_s"].astype(np.float64) + T["car_v"] * tg, Ls - 3.0)
+    sg = T["start"][ln] + s
+    cum, pts = T["cum"], T["pts"]
+    P = np.stack([np.interp(sg, cum, pts[:, k]) for k in range(3)], 1)
+    P2 = np.stack([np.interp(sg + 2.5, cum, pts[:, k]) for k in range(3)], 1)
+    d = P2 - P
+    d /= np.linalg.norm(d, axis=1, keepdims=True) + 1e-9
+    return P, d
+
+
+# ================================================================================================ power
+EV = TL.EVENTS
+T_FLASH = float(EV["transformer_flash"])
+T_OFF = np.array(TL.BLACKOUT_OFF, float)          # ring k starts to die at T_OFF[k]
+T_ON = np.array(TL.POWER_ON, float)[::-1]         # tide from the far edge: ring 13 first ... ring 0 last
+T_LAMP_OFF = float(EV["rooftop_lamp_off"])
+T_LAMP_ON = float(TL.POWER_ON[-1])
+T_STARS = float(EV["stars_begin"])
+T_MID = 0.5 * (T_OFF[-1] + T_ON.min())
+
+# flicker of a dying circuit (s after the switch-off starts) and of a returning one
+_FX = np.array([0.0, 0.02, 0.04, 0.06, 0.08, 0.10, 0.12, 0.14, 0.16, 0.18, 0.20, 0.22, 0.25])
+_FY = np.array([1.0, 0.45, 0.9, 0.3, 0.75, 0.12, 0.55, 0.06, 0.3, 0.02, 0.1, 0.0, 0.0])
+_OX = np.array([0.0, 0.03, 0.06, 0.09, 0.12, 0.16, 0.20, 0.26, 0.34, 0.5])
+_OY = np.array([0.0, 0.55, 0.08, 0.8, 0.25, 0.95, 0.6, 0.9, 1.0, 1.0])
+
+
+def level(tg, ring, jit=0.0):
+    """Per-light supply level 0..1 (vectorised over ring/jit arrays)."""
+    ring = np.asarray(ring)
+    if tg < T_MID:
+        x = tg - T_OFF[ring] - jit
+        return np.interp(x, _FX, _FY, left=1.0, right=0.0)
+    y = tg - T_ON[ring] - jit
+    return np.interp(y, _OX, _OY, left=0.0, right=1.0)
+
+
+def _ring_weights():
+    rmid = np.sqrt(np.maximum(RING_R[:-1], 1.0) * np.minimum(RING_R[1:], 20000.0))
+    cnt = np.array([50, 665, 263, 2199, 6005, 11261, 21160, 41668, 93395, 246266, 599960, 1469055, 2361055,
+                    1668561], float)
+    w = cnt / (1.0 + (rmid / 1200.0) ** 2.2)
+    return w / w.sum()
+
+
+_RW = _ring_weights()
+
+
+def _flash(tg):
+    """Substation arc: a few blue-white pulses, then a dull orange burn that fades."""
+    t = tg - T_FLASH
+    if t < -0.01 or t > 6.0:
+        return 0.0, 0.0
+    arc = 0.0
+    for t0, dur, amp in ((0.0, 0.10, 1.0), (0.13, 0.07, 0.6), (0.245, 0.05, 0.35), (0.37, 0.04, 0.2),
+                         (0.62, 0.03, 0.12)):
+        x = (t - t0) / dur
+        if 0 <= x <= 1:
+            arc = max(arc, amp * (1 - x) ** 1.5 * min(1.0, x * 8 + 0.3))
+    burn = 0.0 if t < 0.1 else 0.25 * np.exp(-(t - 0.1) / 1.6) * (0.8 + 0.2 * np.sin(t * 23.0) * np.sin(t * 7.3))
+    return float(arc), float(burn)
+
+
+def power(tg):
+    """Electrical state of the city at global time tg.
+
+    ring   (14,) supply level of each blackout ring (with flicker), ring k = distance band k from the
+           substation (RING_R); off at TL.BLACKOUT_OFF[k], back on at TL.POWER_ON[13-k]
+    glow   sky-glow (light pollution) level 0..1;  glow_near / glow_far: zenith / horizon parts
+    stars  star visibility 0..1 (dark adaptation; faintest stars need the highest value)
+    mw     Milky Way visibility 0..1
+    lamp   the rooftop bulb 0..1 (dies at rooftop_lamp_off, returns with the last ring)
+    flash, burn   substation arc intensity (blue-white) and the smouldering glow after it
+    """
+    lv = level(tg, np.arange(N_RING))
+    glow = float(np.dot(_RW, lv))
+    near = float(lv[:9].mean())
+    far = float(np.dot(_RW[9:], lv[9:]) / _RW[9:].sum())
+    # dark adaptation after the blackout, drowned again by the returning glow
+    if tg < T_STARS:
+        adapt = 0.0
+    else:
+        a = np.clip((tg - T_STARS) / 10.5, 0, 1)
+        adapt = float(a * (1.6 - 0.6 * a))
+    stars = adapt * float(np.clip(1.0 - glow * 1.15, 0, 1) ** 1.6)
+    mw = float(np.clip((stars - 0.52) / 0.40, 0, 1))
+    mw = mw * mw * (3 - 2 * mw)
+    if tg < T_MID:
+        lamp = float(np.interp(tg - T_LAMP_OFF, [0.0, 0.03, 0.07, 0.10, 0.16, 0.2, 0.26, 0.3, 0.42],
+                               [1.0, 0.35, 0.95, 0.5, 0.8, 0.15, 0.45, 0.12, 0.0], left=1.0, right=0.0))
+    else:
+        lamp = float(np.interp(tg - T_LAMP_ON, _OX, _OY, left=0.0, right=1.0))
+    arc, burn = _flash(tg)
+    return dict(ring=lv, glow=glow, glow_near=near, glow_far=far, stars=stars, mw=mw, lamp=lamp,
+                flash=arc, burn=burn, t=tg)
+
+
+# ================================================================================================ the sky
+LATITUDE = 31.0
+LST_H = 18.5          # local sidereal time: galactic centre low in the south, band arching overhead (ESE)
+
+
+def _eq_to_world(ra_deg, dec_deg, lst_h=LST_H, lat=LATITUDE):
+    H = np.radians(lst_h * 15.0 - ra_deg)
+    d, ph = np.radians(dec_deg), np.radians(lat)
+    U = np.sin(d) * np.sin(ph) + np.cos(d) * np.cos(ph) * np.cos(H)
+    Nn = np.sin(d) * np.cos(ph) - np.cos(d) * np.sin(ph) * np.cos(H)
+    E = -np.cos(d) * np.sin(H)
+    return np.array([E, U, -Nn])
+
+
+GC_DIR = _eq_to_world(266.405, -28.936)           # galactic centre (world direction)
+NGP_DIR = _eq_to_world(192.859, 27.128)           # north galactic pole
+
+
+def _gbasis():
+    from .sky import galactic_basis
+    return galactic_basis(GC_DIR, NGP_DIR)
+
+
+MW_BASIS = _gbasis()                              # world_dirs = galactic_dirs @ MW_BASIS.T
+
+_SKY = {}
+
+
+def sky_assets():
+    if "s" not in _SKY:
+        from . import sky as SK
+        f = SK.field()
+        mw = SK.milky_way()
+        M = MW_BASIS.astype(np.float32)
+        fd = f["dirs"].astype(np.float32)
+        s_d = (mw["s_dirs"] @ M.T).astype(np.float32)
+        g_d = (mw["g_dirs"] @ M.T).astype(np.float32)
+        f_flux = f["rgb"].max(axis=1)
+        s_flux = mw["s_rgb"].max(axis=1)
+        _SKY["s"] = dict(f_dirs=fd, f_rgb=f["rgb"], f_flux=f_flux, s_dirs=s_d, s_rgb=mw["s_rgb"], s_flux=s_flux,
+                         g_dirs=g_d, g_rgb=mw["g_rgb"])
+    return _SKY["s"]
+
+
+def _extinction(el):
+    """Atmospheric + haze extinction factor for a direction of elevation el (radians)."""
+    am = 1.0 / np.maximum(np.sin(np.maximum(el, 0.0)) + 0.025, 0.03)
+    return 10 ** (-0.4 * 0.42 * (am - 1.0)) * np.clip(el / np.radians(1.5), 0, 1)
+
+
+def star_weight(flux, vis, width=0.9):
+    """Dark-adaptation visibility per star: limiting magnitude rises with vis; faint stars last."""
+    if vis <= 0:
+        return np.zeros_like(flux)
+    m = -2.5 * np.log10(np.maximum(flux, 1e-12))
+    # the field's brightest stars have flux ~ 10**(0.4*11) ... map vis to a limiting magnitude
+    m_lim = M_BRIGHT + (M_FAINT - M_BRIGHT) * vis
+    return np.clip((m_lim - m) / width + 0.5, 0, 1) ** 1.5
+
+
+M_BRIGHT, M_FAINT = -7.6, 2.9           # in units of -2.5 log10(flux) of sky.field()/milky_way()
+
+
+# ================================================================================================ z-buffer
+from numba import njit  # noqa: E402
+
+
+@njit(cache=True)
+def _tri(zb, x0, y0, w0, x1, y1, w1, x2, y2, w2):
+    H, W = zb.shape
+    minx = max(int(np.floor(min(x0, min(x1, x2)))), 0)
+    maxx = min(int(np.ceil(max(x0, max(x1, x2)))), W - 1)
+    miny = max(int(np.floor(min(y0, min(y1, y2)))), 0)
+    maxy = min(int(np.ceil(max(y0, max(y1, y2)))), H - 1)
+    if minx > maxx or miny > maxy:
+        return
+    area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
+    if abs(area) < 1e-12:
+        return
+    inv = 1.0 / area
+    for py in range(miny, maxy + 1):
+        cy = py + 0.5
+        for px in range(minx, maxx + 1):
+            cx = px + 0.5
+            b0 = ((x1 - cx) * (y2 - cy) - (x2 - cx) * (y1 - cy)) * inv
+            b1 = ((x2 - cx) * (y0 - cy) - (x0 - cx) * (y2 - cy)) * inv
+            b2 = 1.0 - b0 - b1
+            if b0 < -1e-6 or b1 < -1e-6 or b2 < -1e-6:
+                continue
+            w = b0 * w0 + b1 * w1 + b2 * w2
+            if w <= 0:
+                continue
+            z = 1.0 / w
+            if z < zb[py, px]:
+                zb[py, px] = z
+
+
+@njit(cache=True)
+def _zboxes(zb, B, pos, R, U, F, fpx, cx0, cy0, near, tanx, tany):
+    """Rasterise oriented boxes into a depth buffer (camera-space z).
+
+    B: (n, 8) rows [cx, cz, ux, uz, a, b, y0, y1]; u axis (ux, uz) in the ground plane, v = (-uz, ux)."""
+    corners = np.empty((8, 3))
+    cc = np.empty((8, 3))
+    face_idx = np.array([[4, 5, 6, 7], [0, 1, 5, 4], [2, 3, 7, 6], [1, 2, 6, 5], [3, 0, 4, 7]])
+    poly = np.empty((10, 3))
+    tmp = np.empty((10, 3))
+    for i in range(B.shape[0]):
+        cx, cz, ux, uz, a, b, y0, y1 = B[i, 0], B[i, 1], B[i, 2], B[i, 3], B[i, 4], B[i, 5], B[i, 6], B[i, 7]
+        vx, vz = -uz, ux
+        # quick frustum cull with a bounding sphere
+        mx, my, mz = cx - pos[0], 0.5 * (y0 + y1) - pos[1], cz - pos[2]
+        rad = np.sqrt(a * a + b * b + 0.25 * (y1 - y0) ** 2)
+        zc = mx * F[0] + my * F[1] + mz * F[2]
+        if zc < -rad:
+            continue
+        xc = mx * R[0] + my * R[1] + mz * R[2]
+        yc = mx * U[0] + my * U[1] + mz * U[2]
+        if abs(xc) > (max(zc, 0.0) * tanx + rad * 1.5) or abs(yc) > (max(zc, 0.0) * tany + rad * 1.5):
+            continue
+        k = 0
+        for yy in (y0, y1):
+            for (su, sv) in ((-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)):
+                corners[k, 0] = cx + su * a * ux + sv * b * vx
+                corners[k, 1] = yy
+                corners[k, 2] = cz + su * a * uz + sv * b * vz
+                k += 1
+        for k in range(8):
+            dx, dy, dz = corners[k, 0] - pos[0], corners[k, 1] - pos[1], corners[k, 2] - pos[2]
+            cc[k, 0] = dx * R[0] + dy * R[1] + dz * R[2]
+            cc[k, 1] = dx * U[0] + dy * U[1] + dz * U[2]
+            cc[k, 2] = dx * F[0] + dy * F[1] + dz * F[2]
+        # faces: top, and the four sides; cull those facing away from the camera
+        for f in range(5):
+            if f == 0:
+                if pos[1] <= y1:
+                    continue
+            else:
+                # outward normal of side f
+                if f == 1:
+                    nx, nz, px_, pz_ = -vx, -vz, cx - b * vx, cz - b * vz
+                elif f == 2:
+                    nx, nz, px_, pz_ = vx, vz, cx + b * vx, cz + b * vz
+                elif f == 3:
+                    nx, nz, px_, pz_ = ux, uz, cx + a * ux, cz + a * uz
+                else:
+                    nx, nz, px_, pz_ = -ux, -uz, cx - a * ux, cz - a * uz
+                if nx * (pos[0] - px_) + nz * (pos[2] - pz_) <= 0:
+                    continue
+            m = 0
+            for q in range(4):
+                c = face_idx[f, q]
+                poly[m, 0], poly[m, 1], poly[m, 2] = cc[c, 0], cc[c, 1], cc[c, 2]
+                m += 1
+            # clip against z > near
+            n2 = 0
+            for q in range(m):
+                a0 = poly[q]
+                a1 = poly[(q + 1) % m]
+                in0 = a0[2] > near
+                in1 = a1[2] > near
+                if in0:
+                    tmp[n2, 0], tmp[n2, 1], tmp[n2, 2] = a0[0], a0[1], a0[2]
+                    n2 += 1
+                if in0 != in1:
+                    t = (near - a0[2]) / (a1[2] - a0[2])
+                    tmp[n2, 0] = a0[0] + t * (a1[0] - a0[0])
+                    tmp[n2, 1] = a0[1] + t * (a1[1] - a0[1])
+                    tmp[n2, 2] = near
+                    n2 += 1
+            if n2 < 3:
+                continue
+            # project + fan
+            sx0 = cx0 + fpx * tmp[0, 0] / tmp[0, 2]
+            sy0 = cy0 - fpx * tmp[0, 1] / tmp[0, 2]
+            w0 = 1.0 / tmp[0, 2]
+            for q in range(1, n2 - 1):
+                sx1 = cx0 + fpx * tmp[q, 0] / tmp[q, 2]
+                sy1 = cy0 - fpx * tmp[q, 1] / tmp[q, 2]
+                sx2 = cx0 + fpx * tmp[q + 1, 0] / tmp[q + 1, 2]
+                sy2 = cy0 - fpx * tmp[q + 1, 1] / tmp[q + 1, 2]
+                _tri(zb, sx0, sy0, w0, sx1, sy1, 1.0 / tmp[q, 2], sx2, sy2, 1.0 / tmp[q + 1, 2])
+
+
+def _cam_params(cam):
+    return (cam.pos.astype(np.float64), cam.right.astype(np.float64), cam.up.astype(np.float64),
+            cam.fwd.astype(np.float64), float(cam.fpx), float(cam.W * 0.5 + cam.shift[0]),
+            float(cam.H * 0.5 - cam.shift[1]))
+
+
+def zbuffer(cam, boxes, W, H):
+    """Depth buffer (H,W) of camera-space z (inf = empty) for boxes (n, 8)."""
+    zb = np.full((H, W), np.inf, np.float64)
+    pos, Rv, Uv, Fv, fpx, cx0, cy0 = _cam_params(cam)
+    tanx = (W * 0.5 + abs(cam.shift[0])) / fpx
+    tany = (H * 0.5 + abs(cam.shift[1])) / fpx
+    _zboxes(zb, np.ascontiguousarray(boxes, np.float64), pos, Rv, Uv, Fv, fpx, cx0, cy0, 0.3, tanx, tany)
+    return zb
+
+
+def building_boxes(exclude_tag=()):
+    """All buildings as boxes (n, 8): [cx, cz, ux, uz, a, b, y0, y1]."""
+    key = ("boxes",) + tuple(exclude_tag)
+    if key not in _L:
+        L = layout()
+        yaw = L["b_yaw"].astype(np.float64)
+        h = L["b_fl"] * L["b_fh"].astype(np.float64)
+        B = np.stack([L["b_x"], L["b_z"], np.cos(yaw), -np.sin(yaw), L["b_a"], L["b_b"], np.zeros(len(yaw)), h], 1)
+        keep = np.ones(len(B), bool)
+        for tg in exclude_tag:
+            keep &= L["b_tag"] != tg
+        _L[key] = np.ascontiguousarray(B[keep], np.float64)
+    return _L[key]
+
+
+# ================================================================================================ drawing
+def _view_dirs(cam, n=24):
+    """World directions of rays through the frame border (and centre)."""
+    W, H = cam.W, cam.H
+    t = np.linspace(0, 1, n)
+    xs = np.concatenate([t * W, t * W, np.zeros(n), np.full(n, W), [W / 2]])
+    ys = np.concatenate([np.zeros(n), np.full(n, H), t * H, t * H, [H / 2]])
+    xc = (xs - W * 0.5 - cam.shift[0]) / cam.fpx
+    yc = -(ys - H * 0.5 + cam.shift[1]) / cam.fpx
+    D = xc[:, None] * cam.right[None] + yc[:, None] * cam.up[None] + cam.fwd[None]
+    return D / np.linalg.norm(D, axis=1, keepdims=True)
+
+
+def _zenith_in_view(cam):
+    x, y, c, ok = cam.project_dirs(np.array([[0.0, 1.0, 0.0]]))
+    return bool(ok[0] and -2 < x[0] < cam.W + 2 and -2 < y[0] < cam.H + 2)
+
+
+def sky_dots(cam, spacing_px=3.0, el_min=-0.03):
+    """World-anchored stipple of sky directions with ~constant screen spacing.
+    Returns dirs (N,3), el (N,), az (N,), u (N,) random in [0,1)."""
+    focal_px1920 = cam.focal / 36.0 * 1920.0
+    dth = spacing_px / focal_px1920
+    D = _view_dirs(cam)
+    el = np.arcsin(np.clip(D[:, 1], -1, 1))
+    az = np.arctan2(D[:, 0], -D[:, 2])
+    e0 = max(el.min() - 2 * dth, el_min)
+    e1 = min(el.max() + 2 * dth, np.pi / 2)
+    if _zenith_in_view(cam):
+        e1 = np.pi / 2
+        a_lo, a_hi = -np.pi, np.pi
+    else:
+        ac = np.arctan2(cam.fwd[0], -cam.fwd[2])
+        rel = np.mod(az - ac + np.pi, 2 * np.pi) - np.pi
+        a_lo, a_hi = ac + rel.min() - 0.05, ac + rel.max() + 0.05
+        if cam.fwd[1] > 0.2:      # looking up: rows near the top of the frame span more azimuth
+            a_lo, a_hi = ac - min(np.pi, (a_hi - a_lo) * 1.2), ac + min(np.pi, (a_hi - a_lo) * 1.2)
+    if e1 <= e0:
+        return np.zeros((0, 3)), np.zeros(0), np.zeros(0), np.zeros(0)
+    i0, i1 = int(np.floor(e0 / dth)), int(np.ceil(e1 / dth))
+    rows = np.arange(i0, i1 + 1)
+    elr = (rows + 0.5) * dth
+    naz = np.maximum(1, np.round(2 * np.pi * np.cos(np.clip(elr, -1.5, 1.5)) / dth)).astype(np.int64)
+    step = 2 * np.pi / naz
+    j0 = np.floor(a_lo / step).astype(np.int64)
+    j1 = np.ceil(a_hi / step).astype(np.int64)
+    j1 = np.minimum(j1, j0 + naz - 1)
+    cnt = np.maximum(j1 - j0 + 1, 0)
+    tot = int(cnt.sum())
+    if tot == 0:
+        return np.zeros((0, 3)), np.zeros(0), np.zeros(0), np.zeros(0)
+    ri = np.repeat(np.arange(len(rows)), cnt)
+    jj = np.repeat(j0, cnt) + (np.arange(tot) - np.repeat(np.cumsum(cnt) - cnt, cnt))
+    jm = np.mod(jj, naz[ri])
+    key = (rows[ri] + 100000) * 1000003 + jm
+    h1 = hash01(key, 51)
+    h2 = hash01(key, 52)
+    e = (rows[ri] + 0.5 + (h1 - 0.5) * 0.8) * dth
+    a = (jm + 0.5 + (h2 - 0.5) * 0.8) * step[ri]
+    ce = np.cos(e)
+    dirs = np.stack([ce * np.sin(a), np.sin(e), -ce * np.cos(a)], 1)
+    return dirs, e, a, hash01(key, 53)
+
+
+# dome colours (linear HDR radiance) — through ACES these land on the BIBLE's murky #3A2412 lid:
+# horizon ~#5A3A22, zenith ~#2A1C16; the blacked-out night sky ~#02040C
+DOME_HOR = np.array([0.085, 0.046, 0.021])
+DOME_ZEN = np.array([0.028, 0.017, 0.012])
+NIGHT_ZEN = np.array([0.0026, 0.0052, 0.0155])
+NIGHT_HOR = np.array([0.0045, 0.0062, 0.0125])
+RESID_HOR = np.array([0.010, 0.0055, 0.0025])
+
+
+def dome_radiance(dirs, el, az, cam_pos, pw):
+    """Sky brightness per direction: city glow (by the rings lit along that bearing), night sky,
+    the flash of the substation."""
+    se = np.sin(np.maximum(el, 0.0))
+    hor = np.exp(-np.maximum(el, 0) / np.radians(9.0))
+    base = DOME_ZEN[None] * (1 - hor[:, None]) + DOME_HOR[None] * hor[:, None]
+    base = base * (1.0 + 0.35 * np.exp(-np.maximum(el, 0) / np.radians(2.5)))[:, None]
+    # which rings light this part of the sky: ground point where the line of sight crosses ~1.2 km
+    D = np.clip(1200.0 / np.maximum(np.tan(np.maximum(el, np.radians(0.4))), 1e-3), 0, 15000.0)
+    lv = np.zeros(len(el))
+    for f in (0.55, 1.0, 1.8):
+        g = cam_pos[[0, 2]][None] + (D * f)[:, None] * np.stack([np.sin(az), -np.cos(az)], 1)
+        rk, rd = ring_fast(g)
+        lv += level(pw["t"], rk)
+    lv /= 3.0
+    L = base * (0.35 * pw["glow"] + 0.65 * lv)[:, None]
+    night = NIGHT_ZEN[None] * (1 - hor[:, None]) + NIGHT_HOR[None] * hor[:, None]
+    L = L + night + RESID_HOR[None] * np.exp(-np.maximum(el, 0) / np.radians(4.0))[:, None] * (1 - pw["glow"])
+    if pw["flash"] > 0 or pw["burn"] > 0:
+        v = SUBSTATION_POS + np.array([0, 20.0, 0]) - cam_pos
+        v /= np.linalg.norm(v)
+        cosang = np.clip(dirs @ v, -1, 1)
+        ang = np.arccos(cosang)
+        fl = pw["flash"] * (0.9 * np.exp(-ang / 0.10) + 0.25 * np.exp(-ang / 0.6)) * (0.5 + 0.5 * hor)
+        L = L + hex_lin("#BFE0FF")[None] * (fl * 0.9)[:, None]
+        L = L + hex_lin("#FF7A30")[None] * (pw["burn"] * 0.05 * np.exp(-ang / 0.08))[:, None]
+    return L
+
+
+def draw_sky(R, cam, pw, spacing_px=2.6, energy=1.0):
+    dirs, el, az, u = sky_dots(cam, spacing_px)
+    if len(dirs) == 0:
+        return
+    L = dome_radiance(dirs, el, az, cam.pos, pw)
+    # pointillist stipple: a fine grain of dots with mild brightness spread + rare complementary flecks
+    m = 0.55 + 0.9 * u
+    h = hash01(np.arange(len(u)) + 7, 54)
+    tint = np.ones((len(u), 3))
+    tint[h < 0.05] = [0.85, 0.9, 1.3]
+    tint[(h > 0.95)] = [1.15, 1.05, 0.8]
+    # energy per dot = radiance * the solid angle it stands for (px^2 @1920)
+    E = L * (m[:, None] * tint) * (spacing_px ** 2)
+    R.draw_dirs(cam, dirs, E.astype(np.float32), size_px=1.0, energy=energy)
+
+
+def _twinkle(n_idx, tg, el, amp=0.22):
+    ph = hash01(n_idx, 61) * 6.283
+    fr = 2.0 + 5.0 * hash01(n_idx, 62)
+    k = amp * (1.0 + 2.0 * np.exp(-np.maximum(el, 0) / 0.25))
+    return 1.0 + k * np.sin(tg * fr + ph) * np.sin(tg * fr * 0.37 + ph * 1.7)
+
+
+def draw_stars(R, cam, pw, energy=1.0, mw_energy=1.0):
+    vis, mwv = pw["stars"], pw["mw"]
+    if vis <= 0:
+        return
+    S = sky_assets()
+    tg = pw["t"]
+    for dk, ck, fk, e_mul, tag in (("f_dirs", "f_rgb", "f_flux", 1.0, 0), ("s_dirs", "s_rgb", "s_flux", 0.9, 1)):
+        D, C, F = S[dk], S[ck], S[fk]
+        el = np.arcsin(np.clip(D[:, 1], -1, 1))
+        w = star_weight(F, vis)
+        keep = (w > 0.002) & (el > 0)
+        if not keep.any():
+            continue
+        idx = np.nonzero(keep)[0]
+        ext = _extinction(el[idx])
+        tw = _twinkle(idx + tag * 1000000, tg, el[idx])
+        col = C[idx] * (w[idx] * ext * tw * e_mul)[:, None]
+        # the brightest stars are drawn a touch larger (they bloom on film)
+        br = np.clip(-2.5 * np.log10(np.maximum(F[idx], 1e-9)) , -8, 3)
+        size = 0.55 + 0.22 * np.clip(-br - 2.0, 0, 5) ** 0.7
+        R.draw_dirs(cam, D[idx], col.astype(np.float32), size_px=size.astype(np.float32), energy=energy)
+    if mwv > 0:
+        D, C = S["g_dirs"], S["g_rgb"]
+        el = np.arcsin(np.clip(D[:, 1], -1, 1))
+        keep = el > 0.0
+        idx = np.nonzero(keep)[0]
+        ext = _extinction(el[idx])
+        col = C[idx] * (ext * mwv * 0.0055)[:, None]
+        R.draw_dirs(cam, D[idx], col.astype(np.float32), size_px=1.5, soft=True, energy=mw_energy)
+
+
+# ------------------------------------------------------------------------------------------ lights
+D_REF, ALPHA, HAZE_L = 900.0, 1.25, 9000.0
+WARM_SHIFT = np.array([1.0, 0.90, 0.74])
+
+
+def _atten(d):
+    a = (D_REF / np.maximum(d, 40.0)) ** ALPHA * np.exp(-d / HAZE_L)
+    return a
+
+
+def _warm(d):
+    return WARM_SHIFT[None, :] ** np.clip(d / 7000.0, 0, 2.5)[:, None]
+
+
+def _ztest(zb, x, y, z, tol=0.004, bias=0.8):
+    H, W = zb.shape
+    xi = np.clip(x.astype(np.int64), 0, W - 1)
+    yi = np.clip(y.astype(np.int64), 0, H - 1)
+    return z <= zb[yi, xi] * (1.0 + tol) + bias
+
+
+def _splat(R, x, y, r_px, E, soft=False):
+    if len(x) == 0:
+        return
+    R.acc.splat(np.ascontiguousarray(x, np.float32), np.ascontiguousarray(y, np.float32),
+                np.ascontiguousarray(np.broadcast_to(np.asarray(r_px, np.float32) * R.s, np.shape(x)), np.float32),
+                np.ascontiguousarray(E * R.e, np.float32), soft=soft)
+
+
+def _in_frame(cam, x, y, ok, m=4.0):
+    return ok & (x > -m) & (x < cam.W + m) & (y > -m) & (y < cam.H + m)
+
+
+def _select_tiles(cam, s_target=2.2, f_min=0.015):
+    Wd = windows()
+    ts = Wd["tile_start"]
+    cnt = np.diff(ts)
+    g = (np.arange(NT) + 0.5) * TILE - CITY_R
+    tz, tx = np.meshgrid(g, g, indexing="ij")
+    C = np.stack([tx.ravel(), np.full(NT * NT, 80.0), tz.ravel()], 1)
+    rad = 470.0
+    d = C - cam.pos
+    zc = d @ cam.fwd
+    xc = d @ cam.right
+    yc = d @ cam.up
+    tanx = (cam.W * 0.5) / cam.fpx
+    tany = (cam.H * 0.5) / cam.fpx
+    ok = (cnt > 0) & (zc > -rad) & (np.abs(xc) < np.maximum(zc, 0) * tanx + rad * 1.5) & \
+         (np.abs(yc) < np.maximum(zc, 0) * tany + rad * 1.5)
+    dist = np.maximum(np.linalg.norm(d, axis=1) - rad * 0.6, 30.0)
+    focal1920 = cam.focal / 36.0 * 1920.0
+    d_lod = 3.5 * focal1920 / s_target
+    f = np.clip((d_lod / dist) ** 2, f_min, 1.0)
+    t = np.nonzero(ok)[0]
+    n = np.ceil(f[t] * cnt[t]).astype(np.int64)
+    tot = int(n.sum())
+    if tot == 0:
+        return np.zeros(0, np.int64), np.zeros(0)
+    base = np.repeat(ts[t], n)
+    off = np.arange(tot) - np.repeat(np.cumsum(n) - n, n)
+    w = np.repeat(cnt[t] / np.maximum(n, 1), n)
+    return base + off, w
+
+
+def _nvec(code):
+    ang = code.astype(np.float64) * (2 * np.pi / 254.0)
+    return np.cos(ang), np.sin(ang)
+
+
+def draw_windows(R, cam, zb, pw, energy=1.0, s_target=2.2):
+    Wd = windows()
+    idx, wlod = _select_tiles(cam, s_target)
+    if len(idx) == 0:
+        return
+    P = Wd["P"][idx]
+    code = Wd["nrm"][idx]
+    kind = Wd["kind"][idx]
+    omni = code == 255
+    nx, nz = _nvec(code)
+    vx = cam.pos[0] - P[:, 0]
+    vz = cam.pos[2] - P[:, 2]
+    vn = np.sqrt(vx * vx + vz * vz) + 1e-6
+    face = (nx * vx + nz * vz) / vn
+    keep = omni | (face > 0.02)
+    x, y, z, coc, ok = cam.project(P)
+    keep &= _in_frame(cam, x, y, ok)
+    keep &= _ztest(zb, x, y, z)
+    k = np.nonzero(keep)[0]
+    if len(k) == 0:
+        return
+    gi = idx[k]
+    E = Wd["E"][gi].astype(np.float64)
+    kd = kind[k]
+    ring = Wd["ring"][gi]
+    tg = pw["t"]
+    lv = level(tg, ring, hash01(gi, 71) * 0.10)
+    # special behaviours
+    stair = kd == K_STAIR
+    if stair.any():
+        ph = hash01(gi[stair], 72) * 30.0
+        per = 9.0 + 14.0 * hash01(gi[stair], 73)
+        on = hash01(gi[stair] * 7 + np.floor((tg + ph) / per).astype(np.int64), 74) < 0.33
+        E[stair] *= on[:, None]
+    flick = kd == K_FLICK
+    if flick.any():
+        fl = hash01(gi[flick] * 131 + np.floor(tg * 9.0).astype(np.int64), 75)
+        E[flick] *= (0.35 + 0.9 * fl)[:, None] * np.array([0.8, 0.95, 1.35])
+    avi = kd == K_AVI
+    if avi.any():
+        phase = np.mod(tg / 1.5 + hash01(Wd["bid"][gi[avi]], 76), 1.0)
+        E[avi] *= (phase < 0.42)[:, None] * 1.0
+        lv[avi] = 1.0                                # battery-backed obstruction lights
+    em = kd == K_EMERG
+    if em.any():
+        lv[em] = np.maximum(lv[em], 0.55 * (hash01(gi[em], 77) < 0.55))
+    f = np.where(omni[k], 1.0, 0.3 + 0.7 * np.clip(face[k], 0, 1))
+    d = z[k].astype(np.float64)
+    E = E * (wlod[k] * lv * f * _atten(d))[:, None] * _warm(d)
+    live = lv > 0.002
+    size = 0.55 + 0.5 * np.clip(1.0 - d / 2500.0, 0, 1)
+    _splat(R, x[k][live], y[k][live], size[live], (E[live] * energy).astype(np.float32))
+
+
+POOL_L = 0.16          # peak road radiance under a unit lamp
+
+
+def draw_lamps(R, cam, zb, pw, energy=1.0, pools=True):
+    Lm = lamps()
+    P = Lm["P"]
+    x, y, z, coc, ok = cam.project(P)
+    keep = _in_frame(cam, x, y, ok, 30.0)
+    k = np.nonzero(keep)[0]
+    if len(k) == 0:
+        return
+    tg = pw["t"]
+    lv = level(tg, Lm["ring"][k], hash01(k, 81) * 0.10)
+    E = Lm["E"][k].astype(np.float64) * lv[:, None]
+    d = z[k].astype(np.float64)
+    vis = _ztest(zb, x[k], y[k], z[k]) & (lv > 0.002) & _in_frame(cam, x[k], y[k], ok[k])
+    Ed = E * (_atten(d))[:, None] * _warm(d)
+    size = 0.6 + 0.7 * np.clip(1.0 - d / 1500.0, 0, 1)
+    _splat(R, x[k][vis], y[k][vis], size[vis], (Ed[vis] * energy).astype(np.float32))
+    if pools:
+        ph = Lm["pool"][k]
+        pk = (ph > 0) & (lv > 0.002)
+        if pk.any():
+            kk = k[pk]
+            Pp = P[kk].astype(np.float64).copy()
+            Pp[:, 1] -= ph[pk] - 0.3
+            xp, yp, zp, _, okp = cam.project(Pp)
+            v = cam.pos[None] - Pp
+            dist = np.linalg.norm(v, axis=1) + 1e-6
+            sin_el = np.clip(v[:, 1] / dist, 0.02, 1.0)
+            rw = 0.85 * ph[pk]
+            r1920 = rw * (cam.focal / 36.0 * 1920.0) / np.maximum(zp, 1e-3)     # pool radius, px @1920
+            rr = r1920 * np.sqrt(sin_el)                                           # foreshortened blob
+            m = _in_frame(cam, xp, yp, okp, 40) & _ztest(zb, xp, yp, zp, 0.01, 3.0) & (rr > 0.35)
+            if m.any():
+                dp = zp[m].astype(np.float64)
+                # surface radiance is distance independent: energy = L * blob area (only haze dims it)
+                rad = np.minimum(rr[m], 120.0)
+                Ep = E[pk][m] * (POOL_L * 1.57 * rad ** 2 * np.exp(-dp / HAZE_L))[:, None] * _warm(dp)
+                _splat(R, xp[m], yp[m], np.maximum(rad, 0.6), (Ep * energy).astype(np.float32), soft=True)
+
+
+def _river_mask():
+    if "rmask" not in _L:
+        def make():
+            import cv2
+            res = 10.0
+            n = int(2 * CITY_R / res)
+            m = np.zeros((n, n), np.uint8)
+            RC, RH = river_line()
+            for i in range(len(RC) - 1):
+                a = ((RC[i] + CITY_R) / res).astype(np.int32)
+                b = ((RC[i + 1] + CITY_R) / res).astype(np.int32)
+                cv2.line(m, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])), 1, thickness=max(1, int(2 * RH[i] / res)))
+            g = (np.arange(n) + 0.5) * res - CITY_R
+            gx, gz = np.meshgrid(g, g)
+            lake = lake_region(np.stack([gx.ravel(), gz.ravel()], 1)).reshape(n, n)
+            m[lake] = 1
+            return dict(m=m)
+        _L["rmask"] = _cached("rivermask", make)["m"]
+    return _L["rmask"]
+
+
+def draw_reflections(R, cam, zb, pw, energy=1.0, n_streak=7):
+    """Glitter paths of lamps (banks, bridges) and near-river windows on the water."""
+    Lm = lamps()
+    kind = Lm["kind"]
+    sel = np.nonzero((kind == L_BANK) | (kind == L_BRIDGE) | (kind == L_DECO))[0]
+    P = Lm["P"][sel].astype(np.float64)
+    tg = pw["t"]
+    lv = level(tg, Lm["ring"][sel], hash01(sel, 81) * 0.10)
+    E0 = Lm["E"][sel].astype(np.float64) * lv[:, None]
+    live = lv > 0.002
+    sel, P, E0 = sel[live], P[live], E0[live]
+    if len(sel) == 0:
+        return
+    hv = cam.pos[[0, 2]][None] - P[:, [0, 2]]
+    dist = np.linalg.norm(hv, axis=1) + 1e-6
+    hv /= dist[:, None]
+    # specular point on the water between lamp and camera (flat mirror)
+    hc = max(cam.pos[1], 1.0)
+    s_spec = dist * P[:, 1] / (P[:, 1] + hc)
+    spread = 4.0 + 0.10 * dist * (hc / (hc + 60.0)) ** 0.3
+    k = np.arange(n_streak)
+    frac = (k + 0.5) / n_streak
+    offs = (frac * 2.2 - 0.6)[None, :] * spread[:, None]
+    base = P[:, [0, 2]] + hv * s_spec[:, None]
+    jit = (hash01(np.arange(len(sel))[:, None] * 17 + k[None, :], 83) - 0.5) * 3.0
+    side = np.stack([-hv[:, 1], hv[:, 0]], 1)
+    Q = base[:, None, :] + hv[:, None, :] * offs[:, :, None] + side[:, None, :] * jit[:, :, None]
+    Q = Q.reshape(-1, 2)
+    wet = _lookup(_river_mask(), Q, 10.0) > 0
+    Pw = np.stack([Q[:, 0], np.full(len(Q), 0.05), Q[:, 1]], 1)
+    # sparkle: each streak point flickers (ripples)
+    ids = (np.repeat(sel, n_streak) * 31 + np.tile(k, len(sel))).astype(np.int64)
+    sp = hash01(ids * 7 + np.floor(tg * 7.0 + hash01(ids, 84) * 7).astype(np.int64), 85)
+    w = np.tile(np.exp(-((frac * 2.2 - 0.6) - 0.2) ** 2 / 0.5), len(sel)) * (0.2 + 1.6 * sp ** 3)
+    x, y, z, coc, ok = cam.project(Pw)
+    m = wet & _in_frame(cam, x, y, ok) & _ztest(zb, x, y, z, 0.01, 2.0)
+    if not m.any():
+        return
+    Er = np.repeat(E0, n_streak, axis=0)[m] * (w[m] * 0.55 / n_streak * 3.0)[:, None]
+    d = z[m].astype(np.float64)
+    Er = Er * (_atten(d))[:, None] * _warm(d)
+    _splat(R, x[m], y[m], 0.6, (Er * energy).astype(np.float32))
+
+
+HEAD, TAIL = hex_lin("#FFF6E0") * 1.1, hex_lin("#FF3B2F") * 0.55
+
+
+def _car_level(tg, ring, surv):
+    if tg < T_MID:
+        a = np.clip(1.0 - (tg - T_OFF[ring] - 0.4) / 1.6, 0, 1)
+    else:
+        a = np.clip((tg - T_ON[ring] - 0.3) / 2.2, 0, 1)
+    return np.where(surv, 1.0, a)
+
+
+def draw_traffic(R, cam, zb, pw, energy=1.0):
+    tg = pw["t"]
+    P, dvec = cars_at(tg)
+    x, y, z, coc, ok = cam.project(P)
+    keep = _in_frame(cam, x, y, ok, 20)
+    k = np.nonzero(keep)[0]
+    if len(k) == 0:
+        return
+    P, dvec = P[k], dvec[k]
+    ring, _ = ring_fast(P[:, [0, 2]])
+    surv = hash01(k, 91) < 0.05
+    cl = _car_level(tg, ring, surv)
+    live = cl > 0.01
+    P, dvec, cl, kk = P[live], dvec[live], cl[live], k[live]
+    v = cam.pos[None] - P
+    dist = np.linalg.norm(v, axis=1)
+    v /= dist[:, None] + 1e-9
+    c = np.sum(dvec * v, axis=1)
+    fh = 0.05 + 0.95 * np.clip(c, 0, 1) ** 4
+    ft = 0.16 + 0.84 * np.clip(-c, 0, 1) ** 1.5
+    for off, col, f, sz in ((2.2, HEAD, fh, 0.7), (-2.2, TAIL, ft, 0.6)):
+        Q = P + dvec * off
+        xq, yq, zq, _, okq = cam.project(Q)
+        m = _in_frame(cam, xq, yq, okq) & _ztest(zb, xq, yq, zq, 0.006, 1.5)
+        d = zq[m].astype(np.float64)
+        E = col[None] * (f[m] * cl[m] * _atten(d))[:, None] * _warm(d)
+        _splat(R, xq[m], yq[m], sz, (E * energy).astype(np.float32))
+    # headlight pools on the asphalt (reads from above)
+    Q = P + dvec * 14.0
+    Q[:, 1] = np.maximum(Q[:, 1] - 0.7, 0.1)
+    xq, yq, zq, _, okq = cam.project(Q)
+    rpx = 7.0 * cam.fpx / np.maximum(zq, 1e-3) / R.s
+    m = _in_frame(cam, xq, yq, okq, 20) & (rpx > 0.8) & _ztest(zb, xq, yq, zq, 0.01, 3.0)
+    if m.any():
+        d = zq[m].astype(np.float64)
+        E = HEAD[None] * (0.35 * cl[m] * _atten(d))[:, None] * _warm(d)
+        _splat(R, xq[m], yq[m], np.minimum(rpx[m], 60), (E * energy).astype(np.float32), soft=True)
+
+
+# ================================================================================================ render_env
+def ground_mask(cam, W, H, far=12000.0):
+    """1 where the view ray hits the ground plane within `far` metres."""
+    ys = np.arange(H) + 0.5
+    xs = np.arange(W) + 0.5
+    # the ground is covered where the ray's downward slope beats cam_height / far; test per pixel row/col
+    xc = (xs - W * 0.5 - cam.shift[0]) / cam.fpx
+    yc = -(ys - H * 0.5 + cam.shift[1]) / cam.fpx
+    dy = (xc[None, :] * cam.right[1] + yc[:, None] * cam.up[1] + cam.fwd[1])
+    dn = np.sqrt((xc[None, :] ** 2 + yc[:, None] ** 2 + 1.0))
+    return (dy / dn < -max(cam.pos[1], 0.5) / far).astype(np.float32)
+
+
+def render_env(R, cam, tg, W, H, sky=True, stars=True, city=True, roof=True, girl=False, pw=None,
+               sky_energy=1.0, city_energy=1.0, star_energy=1.0):
+    """Sky (glow dome / stars + Milky Way), the city and the rooftop set at global time tg.
+
+    Returns (hdr, mask): mask = coverage of solid geometry (buildings, ground, rooftop set) so the
+    caller can put sky-only elements behind it and composite characters on top. R is left empty."""
+    import cv2
+    pw = pw or power(tg)
+    R.new_layer()                                  # start clean
+    boxes = building_boxes(exclude_tag=(1,)) if city else np.zeros((0, 8))
+    zb = zbuffer(cam, boxes, W, H) if city else np.full((H, W), np.inf)
+    cover = np.maximum(np.isfinite(zb).astype(np.float32), ground_mask(cam, W, H) if city else 0.0)
+    soft_cover = np.clip(cv2.GaussianBlur(cover, (0, 0), 0.5) * 1.15, 0, 1)
+    if sky:
+        draw_sky(R, cam, pw, energy=sky_energy)
+    if stars:
+        draw_stars(R, cam, pw, energy=star_energy)
+    sky_img = R.new_layer() * (1.0 - soft_cover)[..., None]
+    if city:
+        draw_lamps(R, cam, zb, pw, energy=city_energy)
+        draw_windows(R, cam, zb, pw, energy=city_energy)
+        draw_traffic(R, cam, zb, pw, energy=city_energy)
+        draw_reflections(R, cam, zb, pw, energy=city_energy)
+    city_img = R.new_layer()
+    hdr = sky_img + city_img
+    mask = soft_cover
+    return hdr, mask

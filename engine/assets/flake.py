@@ -23,7 +23,7 @@ THICK = 0.0115         # flake thickness at the rim (m)
 DUR_SIX = 0.45
 DUR_THREE = 0.60
 LINE_W = 0.052         # ochre line width, canonical units (~1.6 mm)
-VERSION = 3
+VERSION = 5
 
 # outline of the flake, canonical units (the lower-right edge leaves the caption corner dark in II8)
 OUTLINE = np.array([(-2.05, 0.10), (-1.80, 0.82), (-1.20, 1.22), (-0.35, 1.38), (0.55, 1.30), (1.35, 1.02),
@@ -225,12 +225,12 @@ class Flake:
         # albedo: mottled grey-beige with a reddish tint, dark specks, faint iron staining
         m1 = fbm(np.stack([q[:, 0] * 2.2, q[:, 1] * 2.2, np.full(len(q), 7.0)], 1), octaves=4)
         m2 = fbm(np.stack([q[:, 0] * 14, q[:, 1] * 14, np.full(len(q), 1.0)], 1), octaves=2)
-        red = np.clip(0.5 + 1.3 * m1, 0, 1)[:, None]
+        red = np.clip(0.35 + 1.1 * m1, 0, 1)[:, None] * 0.6
         alb = STONE * (1 - red) + STONE_RED * red
         alb = alb * (0.80 + 0.35 * m2 + 0.12 * rng.standard_normal(len(q)))[:, None]
         speck = rng.random(len(q)) < 0.012
         alb[speck] *= 0.35
-        alb = np.clip(alb, 0.02, 1.0) * 0.55
+        alb = np.clip(alb, 0.02, 1.0) * 0.50
         # line attributes for the drawing: nearest SIX and nearest THREE
         i6, u6, d6 = _line_attrs(q, _LINES, range(6))
         i3, u3, d3 = _line_attrs(q, _LINES, range(6, 9))
@@ -252,17 +252,19 @@ class Flake:
         if (_inside(poly2, poly2.mean(axis=0, keepdims=True) + out[:1] * 0.01)).any():
             out = -out
         h = rng.random(m)                                      # 0 = rim, 1 = floor
-        scal = 0.5 + 0.5 * np.sin(s * 34.0 + 2.0 * np.sin(s * 7.0))
+        h = rng.random(m)                                      # 0 = rim, 1 = floor
+        scal = 0.5 + 0.5 * np.sin(h * 14.0 + 1.5 * np.sin(s * 5.0))    # ripples parallel to the rim
         spread = (0.16 + 0.08 * scal) * h ** 0.9               # slope outward (canonical units)
         qe = e + out * spread[:, None]
         Ps = np.stack([qe[:, 0] * S_C, -0.0012 - h * (THICK - 0.0012), -qe[:, 1] * S_C], 1)
         slope = np.arctan2(THICK, (0.20 * S_C))
         ox, oz = out[:, 0], -out[:, 1]
         Ns = np.stack([ox * np.sin(slope), np.full(m, np.cos(slope)) * 0.6, oz * np.sin(slope)], 1)
-        Ns += rng.normal(0, 0.12, Ns.shape) + np.stack([ox, np.zeros(m), oz], 1) * (scal - 0.5)[:, None] * 0.5
+        Ns += rng.normal(0, 0.04, Ns.shape)
+        Ns[:, 1] += (scal - 0.5) * 0.35
         Ns /= np.linalg.norm(Ns, axis=1, keepdims=True)
         m3 = fbm(Ps * 180.0, octaves=3)
-        alb_s = (STONE * 0.8 + STONE_RED * 0.2) * (0.62 + 0.3 * m3)[:, None] * 0.55
+        alb_s = (STONE * 0.8 + STONE_RED * 0.2) * (0.62 + 0.3 * m3)[:, None] * 0.38
         # ---- the floor around: sand with crushed shell (Blombos midden), a disc of radius ~0.2 m
         k = int(260_000 * density)
         rr = 0.21 * np.sqrt(rng.random(k))
@@ -274,11 +276,11 @@ class Flake:
         k = len(Pf)
         hgt = fbm(Pf * 70.0, octaves=3)
         Pf[:, 1] += hgt * 0.0025
-        Nf = np.stack([-fbm(Pf * 70 + 3.3, octaves=2) * 0.5, np.ones(k), -fbm(Pf * 70 + 7.7, octaves=2) * 0.5], 1)
+        Nf = np.stack([-fbm(Pf * 70 + 3.3, octaves=2) * 0.15, np.ones(k), -fbm(Pf * 70 + 7.7, octaves=2) * 0.15], 1)
         Nf /= np.linalg.norm(Nf, axis=1, keepdims=True)
-        alb_f = SAND * (0.55 + 0.5 * rng.random(k) ** 2)[:, None] * 0.5
-        shell = rng.random(k) < 0.03
-        alb_f[shell] = SHELLC * (0.5 + 0.5 * rng.random(shell.sum()))[:, None] * 0.6
+        alb_f = SAND * (0.75 + 0.3 * rng.random(k))[:, None] * 0.22
+        shell = rng.random(k) < 0.02
+        alb_f[shell] = SHELLC * (0.5 + 0.5 * rng.random(shell.sum()))[:, None] * 0.30
         side = dict(P=Ps, N=Ns, alb=alb_s)
         floor = dict(P=Pf, N=Nf, alb=alb_f)
         area_top = area_c * S_C * S_C / len(q)
@@ -337,7 +339,7 @@ class Flake:
         cov = self.ink(tg)[:, None]
         alb = d["top_alb"]
         g = d["top_grain"][:, None]
-        och = OCHRE * (0.85 + 0.4 * (g + 0.4)) * 0.62 + OCHRE_DK * 0.15
+        och = OCHRE * (0.85 + 0.5 * (g + 0.4)) * 0.95 + OCHRE_DK * 0.10
         alb_t = alb * (1 - cov) + och * cov
         top = SolidCloud(d["top_P"], d["top_N"], alb_t, area=d["area_top"], key=hash01(np.arange(self.n_top), 71))
         side = SolidCloud(d["side_P"], d["side_N"], d["side_alb"], area=d["area_side"],

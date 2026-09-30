@@ -185,7 +185,12 @@ _G = {}
 
 def giant():
     if "g" not in _G:
-        _G["g"] = RedGiant(n=700_000, seed=33)
+        g = RedGiant(n=700_000, seed=33)
+        # random (not Fibonacci) sampling: no moire when the limb fills the sky at grazing angles
+        rng = np.random.default_rng(33)
+        v = rng.normal(size=(g.n, 3))
+        g.N = (v / np.linalg.norm(v, axis=1, keepdims=True)).astype(np.float32)
+        _G["g"] = g
     return _G["g"]
 
 

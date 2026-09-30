@@ -192,19 +192,22 @@ class Girl:
         outer &= sd_ellipsoid(hp.astype(np.float64), (0, 0.018, -0.012), (0.068, 0.083, 0.088)) > 0.002
         hp, hn = hp[outer], hn[outer]
         crown = np.array([0.0, 0.10, -0.03])
-        tang = hp - crown
+        radial = hp - crown
+        down = np.tile(np.array([0.0, -1.0, 0.0]), (len(hp), 1))
+        tang = 0.35 * radial / (np.linalg.norm(radial, axis=1, keepdims=True) + 1e-9) + 0.65 * down
         tang -= hn * np.sum(tang * hn, axis=1, keepdims=True)
         tang /= np.linalg.norm(tang, axis=1, keepdims=True) + 1e-9
         n = hp.shape[0]
         u = hash01(np.arange(n), 11)
         v = hash01(np.arange(n), 12)
-        base = hp + hn * ((u - 0.5) * 0.0025 + (v > 0.975) * v * 0.007)[:, None]
-        dash = [base + tang * (k * 0.0016) for k in (-1, 0, 1)]
+        base = hp + hn * ((u - 0.5) * 0.0012 + (v > 0.99) * v * 0.004)[:, None]
+        steps = (-2, -1, 0, 1, 2)
+        dash = [base + tang * (k * 0.0017) for k in steps]
         self.hair_P = np.concatenate(dash).astype(np.float32)
-        self.hair_N = np.concatenate([hn] * 3).astype(np.float32)
+        self.hair_N = np.concatenate([hn] * len(steps)).astype(np.float32)
         fade = np.clip(np.abs(face[outer]) / 0.010, 0.35, 1.0)
-        self.hair_alb = (HAIR[None, :] * np.concatenate([fade] * 3)[:, None]).astype(np.float32)
-        self.hair_area = np.float32(d["hair_a"] / 3.0 * 1.2)
+        self.hair_alb = (HAIR[None, :] * np.concatenate([fade] * len(steps))[:, None]).astype(np.float32)
+        self.hair_area = np.float32(d["hair_a"] / len(steps) * 1.2)
         body_hood = _star_patch(d["body_P"], d["body_N"])
         self.body_alb = np.where(body_hood[:, None], PATCH, HOODIE).astype(np.float32)
         below = d["body_P"][:, 1] < 0.105
@@ -424,7 +427,8 @@ class Elder:
         return P.astype(np.float32), N.astype(np.float32), np.concatenate(As).astype(np.float32)
 
     def pose(self, head_pitch=0.0, head_yaw=0.0, armR=(0.1, 0.1, 0.1), armL=(0.1, 0.1, 0.1),
-             palmR=None, curlR=0.8, curlL=0.9, lean=0.0, spreadR=0.25, arm_n=9000, hand_n=5200):
+             palmR=None, curlR=0.8, curlL=0.9, lean=0.0, spreadR=0.25, arm_n=9000, hand_n=5200,
+             skip_hand_R=False):
         d = self.d
         Ps, Ns, As, Ks, parts = [], [], [], [], []
         Rl = rot("x", lean)
@@ -458,6 +462,11 @@ class Elder:
             parts.append(np.full(len(P), 2, np.int16))
             sx = -1 if side == "R" else 1
             Rhand = palmR if (palmR is not None and side == "R") else Rf @ rot("y", np.pi / 2 * -sx)
+            info[f"wrist{side}"] = w
+            info[f"hand{side}_R"] = Rhand
+            info[f"palm{side}"] = w + np.asarray(Rhand) @ np.array([0, -0.06, 0.012])
+            if side == "R" and skip_hand_R:
+                continue
             hP, hN, hA = self.hand(Rhand, w, curl=curl, spread=spreadR if side == "R" else 0.2, seed=sd + 50,
                                    n=hand_n)
             Ps.append(hP)
@@ -609,3 +618,24 @@ def hand_pose_dict(hand, Rm, origin, curl, spread=0.3):
     col = np.where(K[:, None] > 0.94, ELDER_CORE * 1.3, col).astype(np.float32)
     return dict(P=Pw.astype(np.float32), N=Nw.astype(np.float32), col=col, area=A, key=K,
                 part=np.zeros(len(P), np.int16))
+
+
+def elder_ik(elder, target_wrist, side="R", lean=0.0, x0=(0.9, 0.1, 0.4)):
+    """Solve (flex, abd, elbow) so the wrist lands on target_wrist (figure space)."""
+    from scipy.optimize import minimize
+    Rl = rot("x", lean)
+    piv = np.array([0, 0.9, 0])
+    sx = -1 if side == "R" else 1
+    sh = Elder.SH * np.array([sx, 1, 1])
+    shw = (sh - piv) @ Rl.T + piv
+
+    def wrist(q):
+        flex, abd, elbow = q
+        Rs = Rl @ rot("z", abd * sx) @ rot("x", -flex)
+        Rf = Rs @ rot("x", -elbow)
+        return shw + Rs @ np.array([0, -0.46, 0]) + Rf @ np.array([0, -0.44, 0])
+
+    def cost(q):
+        return float(np.sum((wrist(q) - target_wrist) ** 2) + 1e-4 * (q[1] ** 2 + q[2] ** 2))
+    r = minimize(cost, np.asarray(x0, float), method="Nelder-Mead", options=dict(xatol=1e-5, fatol=1e-9, maxiter=4000))
+    return tuple(r.x), float(np.sqrt(np.sum((wrist(r.x) - target_wrist) ** 2)))

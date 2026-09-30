@@ -12,9 +12,14 @@ II8  push-in on the nine lines -> match cut to the city (crosshatch.MATCH_SPAN c
 import numpy as np
 
 from .. import timeline as TL
+from ..assets import crosshatch as XH
+from ..assets import fire as FIRE
+from ..assets import flake as FL
 from ..assets import nebula, sky
 from ..assets.shell import Shell
+from ..config import FPS
 from ..raster import Renderer
+from ..solid import Light, SolidCloud, draw_solid
 from ..camera import Camera, ease, ease5, lerp, seg
 from ..color import blackbody, hex_lin
 from ..post import Grade
@@ -240,12 +245,103 @@ def II2(tl, tg, R, W, H):
     return R.resolve(), Grade(wb=(1.0, 0.98, 1.0), sat=1.05, bloom=1.2, vignette=0.2, grain=0.005)
 
 
+# ============================================================================ Blombos: shared
+# Flake space (see assets/flake.py): drawing face = plane y=0, canonical +y = -z (away from her).
+# She kneels on the +z side; the hearth is beyond the flake (-z), a little to the left.
+FIRE_IN_FLAKE = np.array([-0.16, 0.20, -0.82])
+SKY_DIR = np.array([0.25, 0.55, 1.0]) / np.linalg.norm([0.25, 0.55, 1.0])   # the mouth is behind her
+GRADE_CAVE = dict(wb=(0.97, 0.98, 1.03), sat=0.98, bloom=1.0, vignette=0.26, grain=0.006)
+
+
+def flake():
+    return _get("flake", FL.Flake)
+
+
+def fire_lights(tg, fire_pos, k=1.0, fill=1.0):
+    fl = FIRE.flicker(tg)
+    p = np.asarray(fire_pos, float) + FIRE.light_offset(tg)
+    return [Light("point", FIRE.LIGHT, 2.2 * k * fl, vec=p, radius=0.08),
+            Light("dir", hex_lin("#8FA6D8"), 0.035 * fill, vec=SKY_DIR),
+            Light("amb", hex_lin("#40302A"), 0.010 * fill)]
+
+
+def ochre_glints(cl, cov, cam, fire_pos, tg, strength=6.0):
+    """Specular-hematite sparkle inside the ochre (tiny crystal facets catching the firelight)."""
+    n = len(cov)
+    h = np.asarray(cl.key, np.float64)
+    sel = np.nonzero((cov > 0.45) & (h < 0.05))[0]
+    if sel.size == 0:
+        return
+    P = cl.P[sel].astype(np.float64)
+    rng = np.random.default_rng(5)
+    fac = np.stack([np.cos(h[sel] * 977.0) * 0.45, np.ones(sel.size), np.sin(h[sel] * 613.0) * 0.45], 1)
+    fac /= np.linalg.norm(fac, axis=1, keepdims=True)
+    L = fire_pos[None, :] - P
+    L /= np.linalg.norm(L, axis=1, keepdims=True)
+    V = cam.pos[None, :] - P
+    V /= np.linalg.norm(V, axis=1, keepdims=True)
+    Hh = L + V
+    Hh /= np.linalg.norm(Hh, axis=1, keepdims=True)
+    sp = np.clip(np.sum(fac * Hh, axis=1), 0, 1) ** 60
+    e = strength * FIRE.flicker(tg) * sp
+    m = e > 0.02
+    return P[m], (hex_lin("#FFB27A")[None, :] * e[m, None]).astype(np.float32)
+
+
+def draw_flake(R, cam, tg, lights, spacing=2.2, occlude=True, floor=True):
+    top, side, flo, cov = flake().cloud(tg)
+    cl = SolidCloud.concat([top, side])
+    draw_solid(R, cam, cl, lights, spacing_px=spacing, seurat=0.25, p_min=0.35, jitter=0.08,
+               size_var=0.3, occlude=occlude)
+    if floor:
+        # the floor: calm, dark, a touch out of focus -- never glitter
+        draw_solid(R, cam, flo, lights, spacing_px=spacing * 1.3, seurat=0.0, jitter=0.05, size_var=0.2,
+                   occlude=occlude, energy=0.8)
+    return top, cov
+
+
+# ============================================================================ II8 — the nine lines
+D_MATCH = 100.0 * FL.S_C / (36.0 * XH.MATCH_SPAN)       # camera height that satisfies MATCH_SPAN
+II8_LAST = TL.frame_range("II8")[1] - 1                  # index of the last frame of II8
+
+
+def ii8_camera(tl, W, H):
+    """Slow push-in + rotation; at the last frame: straight down, canonical frame centred, x right,
+    y up, 1 canonical unit = MATCH_SPAN * W (crosshatch.py contract)."""
+    t_last = II8_LAST / FPS - TL.shot("II8")[1]
+    u = float(np.clip(tl / t_last, 0.0, 1.2))
+    w = max(1.0 - u, 0.0)
+    # log-distance: eases in fast, then keeps a slow 2 %/s push that carries over the cut
+    l_end = np.log(D_MATCH)
+    B = 0.02 * t_last
+    A = np.log(0.52) - l_end - B
+    dist = float(np.exp(l_end + A * w ** 3 + B * (1.0 - u)))
+    el = np.radians(90.0 - 34.0 * w ** 2.5)
+    az = np.radians(-26.0) * w ** 3
+    look = FL.to_flake(np.array([0.10, 0.06]) * w ** 2)[0]
+    horiz = np.array([np.sin(az), 0.0, np.cos(az)])
+    pos = look + dist * (np.cos(el) * horiz + np.sin(el) * np.array([0.0, 1.0, 0.0]))
+    up = -horiz                                  # far side of the flake is 'up' on screen
+    return Camera(pos, look, up=up, focal=100, bokeh=38.0, W=W, H=H)
+
+
+def II8(tl, tg, R, W, H):
+    cam = ii8_camera(tl, W, H)
+    fire_pos = FIRE_IN_FLAKE + FIRE.light_offset(tg)
+    lights = fire_lights(tg, FIRE_IN_FLAKE)
+    top, cov = draw_flake(R, cam, tg, lights)
+    g = ochre_glints(top, cov, cam, fire_pos, tg)
+    if g is not None:
+        R.draw(cam, g[0], g[1], size_px=0.7)
+    return R.resolve(), Grade(**GRADE_CAVE)
+
+
 # ============================================================================ II3 — black card
 def II3(tl, tg, R, W, H):
     return black(W, H), Grade(bloom=0, grain=0, vignette=0)
 
 
-TABLE = {"II1": II1, "II2": II2, "II3": II3}
+TABLE = {"II1": II1, "II2": II2, "II3": II3, "II8": II8}
 
 
 def render(sid, tl, tg, R, W, H):
