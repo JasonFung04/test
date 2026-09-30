@@ -122,18 +122,26 @@ def spiral_galaxy(n=2_000_000, seed=3, arms=4, pitch_deg=12.0):
         bar = rng.random(nb) < 0.35
         pb[bar] = rng.standard_normal((bar.sum(), 3)) * np.array([0.20, 0.03, 0.05])
         # arms
-        r = np.clip(rng.exponential(0.33, na) + 0.08, 0.08, 1.05)
+        r = rng.exponential(0.33, na * 2) + 0.08
+        r = r[r < 1.05][:na]
+        while r.size < na:
+            extra = rng.exponential(0.33, na) + 0.08
+            r = np.concatenate([r, extra[extra < 1.05]])[:na]
         arm = rng.integers(0, arms, na)
         th0 = np.log(r / 0.08) * k * 0.5
         spread = rng.normal(0, 1, na) * (0.10 + 0.22 * r)
         th = th0 + arm * 2 * np.pi / arms + spread
         pa = np.stack([r * np.cos(th), rng.normal(0, 0.012, na), r * np.sin(th)], axis=1)
         # smooth disk
-        rd = np.clip(rng.exponential(0.30, nd), 0, 1.1)
+        rd = rng.exponential(0.30, nd * 2)
+        rd = rd[rd < 1.1][:nd]
+        nd = rd.size
         thd = rng.uniform(0, 2 * np.pi, nd)
         pd = np.stack([rd * np.cos(thd), rng.normal(0, 0.02, nd), rd * np.sin(thd)], axis=1)
         # HII knots along arms
-        rh = np.clip(rng.exponential(0.35, nh) + 0.15, 0.15, 1.0)
+        rh = rng.exponential(0.35, nh * 3) + 0.15
+        rh = rh[rh < 1.0][:nh]
+        nh = rh.size
         armh = rng.integers(0, arms, nh)
         thh = np.log(rh / 0.08) * k * 0.5 + armh * 2 * np.pi / arms + rng.normal(0, 0.05, nh)
         ph = np.stack([rh * np.cos(thh), rng.normal(0, 0.006, nh), rh * np.sin(thh)], axis=1)
@@ -147,7 +155,8 @@ def spiral_galaxy(n=2_000_000, seed=3, arms=4, pitch_deg=12.0):
         rgb[kind == 0] *= 1.6
         rgb[kind == 3] = pink * 3.0
         # dust lanes: darken the inner (trailing) edge of each arm
-        dark = (kind == 1) & (spread < -0.02) & (spread > -0.14)
+        dark = np.zeros(pos.shape[0], bool)
+        dark[nb:nb + na] = (spread < -0.02) & (spread > -0.14)   # `spread` covers the arm points only
         rgb[dark] *= 0.25
         return dict(pos=pos, rgb=rgb.astype(np.float32), kind=kind)
-    return _cached(f"galaxy_{n}_{seed}_{arms}_{pitch_deg}", make)
+    return _cached(f"galaxy2_{n}_{seed}_{arms}_{pitch_deg}", make)

@@ -193,3 +193,40 @@ def text_points(text, key, size_px, tracking_em=0.0, step=1.0, thresh=0.5, scale
     pts = np.stack([xs + jitter[:, 0] - pad, ys + jitter[:, 1] - base], axis=1).astype(np.float32)
     wts = a[ys, xs].astype(np.float32)
     return pts, wts, w
+
+
+@lru_cache(maxsize=4096)
+def _char_raster(ch, key, size_px):
+    """High-res alpha of one character at size_px (no supersampling tricks: size_px is final)."""
+    f = font(CJK_FALLBACK.get(key, key) if _is_cjk(ch) else key, size_px)
+    asc, desc = f.getmetrics()
+    w = max(1, int(np.ceil(f.getlength(ch))))
+    pad = int(size_px * 0.25) + 2
+    img = Image.new("L", (w + 2 * pad, asc + desc + 2 * pad), 0)
+    ImageDraw.Draw(img).text((pad, pad + asc), ch, font=f, fill=255, anchor="ls")
+    return np.asarray(img, np.float32) / 255.0, pad, pad + asc, f.getlength(ch)
+
+
+def char_points(text, key, size_px, tracking_em=0.0, step=1.3, seed=0, oversample=3):
+    """Glyph points for each character of a line, in px units relative to (left, baseline), y down.
+
+    Returns list of (N_i, 2) float arrays (one per char, possibly empty) and the list of x advances."""
+    rng = np.random.default_rng(seed)
+    big = size_px * oversample
+    out, xs = [], []
+    x = 0.0
+    for ch in text:
+        a, px, py, adv = _char_raster(ch, key, int(round(big)))
+        if ch.strip():
+            ys, xs_ = np.nonzero(a > 0.45)
+            n = xs_.size
+            keep = rng.random(n) < min(1.0, 1.0 / (step * oversample) ** 2) if n else np.zeros(0, bool)
+            # jittered sub-sampling of the hi-res raster
+            xs2 = (xs_[keep] + rng.random(keep.sum()) - px) / oversample
+            ys2 = (ys[keep] + rng.random(keep.sum()) - py) / oversample
+            out.append(np.stack([xs2 + x, ys2], 1).astype(np.float32))
+        else:
+            out.append(np.zeros((0, 2), np.float32))
+        xs.append(x)
+        x += adv / oversample + tracking_em * size_px
+    return out, xs, x
