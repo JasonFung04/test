@@ -34,14 +34,27 @@ def _mod(name):
     return _MODS[name]
 
 
+# shots rendered with temporal super-sampling (180-degree shutter): (sub-samples)
+MOTION_BLUR = {"I2": 3, "I6": 3, "I8": 4, "II1": 3, "E2": 4, "O6": 3, "III8a": 3, "III11": 2, "III3": 2}
+SHUTTER = 0.5
+
+
 def render_time(tg, scale=1.0, frame_idx=None):
     W, H = int(round(FULL_W * scale)), int(round(FULL_H * scale))
     W -= W % 2
     H -= H % 2
     sid, a, b, mod = TL.shot_at(tg)
-    R = Renderer(W, H)
-    res = _mod(mod).render(sid, tg - a, tg, R, W, H)
-    hdr, grade = res if isinstance(res, tuple) else (res, Grade())
+    n_sub = MOTION_BLUR.get(sid, 1) if scale >= 0.49 else 1
+    acc, grade = None, None
+    for k in range(n_sub):
+        dt = ((k + 0.5) / n_sub - 0.5) * SHUTTER / FPS if n_sub > 1 else 0.0
+        t = min(max(tg + dt, a), b - 1e-4)
+        R = Renderer(W, H)
+        res = _mod(mod).render(sid, t - a, t, R, W, H)
+        h, g = res if isinstance(res, tuple) else (res, Grade())
+        acc = h if acc is None else acc + h
+        grade = grade or g
+    hdr = acc / np.float32(n_sub)
     fi = frame_idx if frame_idx is not None else int(round(tg * FPS))
     overlays = []
     post_fn = getattr(_mod(mod), "overlay", None)

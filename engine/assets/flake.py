@@ -23,7 +23,7 @@ THICK = 0.0115         # flake thickness at the rim (m)
 DUR_SIX = 0.45
 DUR_THREE = 0.60
 LINE_W = 0.052         # ochre line width, canonical units (~1.6 mm)
-VERSION = 5
+VERSION = 6
 
 # outline of the flake, canonical units (the lower-right edge leaves the caption corner dark in II8)
 OUTLINE = np.array([(-2.05, 0.10), (-1.80, 0.82), (-1.20, 1.22), (-0.35, 1.38), (0.55, 1.30), (1.35, 1.02),
@@ -265,14 +265,19 @@ class Flake:
         Ns /= np.linalg.norm(Ns, axis=1, keepdims=True)
         m3 = fbm(Ps * 180.0, octaves=3)
         alb_s = (STONE * 0.8 + STONE_RED * 0.2) * (0.62 + 0.3 * m3)[:, None] * 0.38
-        # ---- the floor around: sand with crushed shell (Blombos midden), a disc of radius ~0.2 m
-        k = int(260_000 * density)
-        rr = 0.21 * np.sqrt(rng.random(k))
+        # ---- the floor around: sand with crushed shell (Blombos midden), radius 0.55 m, denser near
+        k = int(900_000 * density)
+        rr = 0.55 * np.sqrt(rng.random(k))
         th = rng.random(k) * 2 * np.pi
+        dens = 1.0 / (1.0 + (rr / 0.13) ** 2)
+        kp = rng.random(k) < dens
+        rr, th, dens = rr[kp], th[kp], dens[kp]
+        k = len(rr)
         Pf = np.stack([rr * np.cos(th), np.full(k, -THICK), rr * np.sin(th)], 1)
         qf = np.stack([Pf[:, 0] / S_C, -Pf[:, 2] / S_C], 1)
         keepf = ~_inside(outline(3) * 1.01, qf)
         Pf = Pf[keepf]
+        dens = dens[keepf]
         k = len(Pf)
         hgt = fbm(Pf * 70.0, octaves=3)
         Pf[:, 1] += hgt * 0.0025
@@ -285,7 +290,7 @@ class Flake:
         floor = dict(P=Pf, N=Nf, alb=alb_f)
         area_top = area_c * S_C * S_C / len(q)
         area_side = cum[-1] * S_C * (THICK / 0.8) / m * 1.6
-        area_floor = np.pi * 0.21 ** 2 / k
+        area_floor = (np.pi * 0.55 ** 2 / (900_000 * density)) / dens
         out = {}
         for name, dd in (("top", top), ("side", side), ("floor", floor)):
             for kk, v in dd.items():

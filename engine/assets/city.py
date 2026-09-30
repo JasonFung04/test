@@ -732,10 +732,10 @@ def _build_lamps():
         dd = int(L["st_dist"][i])
         typ = T_MIX if dd == 0 else int(D[dd - 1, 3])
         if cls == 0:
-            pitch, hh, inten, sides = 20.0, 11.0, 1.0, (-23.0, 23.0, 0.0)
+            pitch, hh, inten, sides = 18.0, 11.0, 1.5, (-23.0, 23.0, 0.0)
             col = SODIUM
         elif cls == 1:
-            pitch, hh, inten, sides = 30.0, 10.0, 0.62, (-14.0, 14.0)
+            pitch, hh, inten, sides = 30.0, 10.0, 0.95, (-14.0, 14.0)
             col = LED if _h1(i, 5) < led_frac.get(typ, 0.3) else SODIUM
         elif cls == 2:
             pitch, hh, inten, sides = 30.0, 8.0, 0.42, (-7.0, 7.0)
@@ -750,7 +750,11 @@ def _build_lamps():
             if len(pts) == 0:
                 continue
             nrm = np.stack([-t[:, 1], t[:, 0]], 1)
-            xz = pts + nrm * sd
+            jl = rng.normal(0, pitch * 0.07, len(pts))
+            jc = rng.normal(0, 0.8, len(pts))
+            xz = pts + nrm * (sd + jc)[:, None] + t * jl[:, None]
+            if cls == 0 and sd == 0.0:
+                xz = xz[rng.random(len(xz)) < 0.7]          # median lamps: not every post
             add(xz, hh, col * inten * (0.8 if sd == 0.0 else 1.0), L_PARK if cls == 5 else L_STREET,
                 hh if cls != 5 else 0.0)
     # expressways + bridges (on their decks)
@@ -1167,8 +1171,13 @@ def sky_assets():
         g_d = (mw["g_dirs"] @ M.T).astype(np.float32)
         f_flux = f["rgb"].max(axis=1)
         s_flux = mw["s_rgb"].max(axis=1)
+        # star clouds and dark dust mottling on top of the model's lanes (direction-anchored texture)
+        gd = mw["g_dirs"].astype(np.float64)
+        n1 = fbm(gd * 9.0, octaves=4, offset=(2.0, 7.0, 1.0))
+        n2 = fbm(gd * 26.0, octaves=3, offset=(9.0, 3.0, 5.0))
+        mott = np.clip(np.exp(1.6 * n1) * (0.75 + 0.5 * np.clip(n2 + 0.5, 0, 1)), 0.15, 3.0).astype(np.float32)
         _SKY["s"] = dict(f_dirs=fd, f_rgb=f["rgb"], f_flux=f_flux, s_dirs=s_d, s_rgb=mw["s_rgb"], s_flux=s_flux,
-                         g_dirs=g_d, g_rgb=mw["g_rgb"])
+                         g_dirs=g_d, g_rgb=mw["g_rgb"], g_mottle=mott)
     return _SKY["s"]
 
 
@@ -1385,7 +1394,7 @@ def sky_dots(cam, spacing_px=3.0, el_min=-0.03):
     i0, i1 = int(np.floor(e0 / dth)), int(np.ceil(e1 / dth))
     rows = np.arange(i0, i1 + 1)
     elr = (rows + 0.5) * dth
-    naz = np.maximum(1, np.round(2 * np.pi * np.cos(np.clip(elr, -1.5, 1.5)) / dth)).astype(np.int64)
+    naz = np.maximum(1, np.round(2 * np.pi * np.cos(np.clip(elr, -np.pi / 2, np.pi / 2)) / dth)).astype(np.int64)
     step = 2 * np.pi / naz
     j0 = np.floor(a_lo / step).astype(np.int64)
     j1 = np.ceil(a_hi / step).astype(np.int64)
@@ -1419,10 +1428,9 @@ RESID_HOR = np.array([0.010, 0.0055, 0.0025])
 def dome_radiance(dirs, el, az, cam_pos, pw):
     """Sky brightness per direction: city glow (by the rings lit along that bearing), night sky,
     the flash of the substation."""
-    se = np.sin(np.maximum(el, 0.0))
-    hor = np.exp(-np.maximum(el, 0) / np.radians(9.0))
+    hor = np.exp(-np.maximum(el, 0) / np.radians(11.0))
     base = DOME_ZEN[None] * (1 - hor[:, None]) + DOME_HOR[None] * hor[:, None]
-    base = base * (1.0 + 0.35 * np.exp(-np.maximum(el, 0) / np.radians(2.5)))[:, None]
+    base = base * (1.0 + 0.9 * np.exp(-np.maximum(el, 0) / np.radians(2.2)))[:, None]
     # which rings light this part of the sky: ground point where the line of sight crosses ~1.2 km
     D = np.clip(1200.0 / np.maximum(np.tan(np.maximum(el, np.radians(0.4))), 1e-3), 0, 15000.0)
     lv = np.zeros(len(el))
@@ -1446,7 +1454,8 @@ def dome_radiance(dirs, el, az, cam_pos, pw):
 
 
 def draw_sky(R, cam, pw, spacing_px=2.2, energy=1.0):
-    dirs, el, az, u = sky_dots(cam, spacing_px)
+    el_min = -np.arctan(max(cam.pos[1], 1.0) / GROUND_FAR) - 0.004
+    dirs, el, az, u = sky_dots(cam, spacing_px, el_min=el_min)
     if len(dirs) == 0:
         return
     L = dome_radiance(dirs, el, az, cam.pos, pw)
@@ -1469,34 +1478,41 @@ def _twinkle(n_idx, tg, el, amp=0.22):
 
 
 def draw_stars(R, cam, pw, energy=1.0, mw_energy=1.0):
+    """Stars and the Milky Way (31 N, summer). vis (pw['stars']) is the dark-adaptation depth: the
+    limiting magnitude sinks with it, so the brightest stars surface first and the faintest last; a
+    star surfaces as a soft glow that sharpens into a point (the sky rising from depth)."""
     vis, mwv = pw["stars"], pw["mw"]
     if vis <= 0:
         return
     S = sky_assets()
     tg = pw["t"]
-    for dk, ck, fk, e_mul, tag in (("f_dirs", "f_rgb", "f_flux", 1.0, 0), ("s_dirs", "s_rgb", "s_flux", 0.9, 1)):
-        D, C, F = S[dk], S[ck], S[fk]
+    for dk, ck, fk, e_mul, tag in (("f_dirs", "f_rgb", "f_flux", STAR_GAIN, 0),
+                                   ("s_dirs", "s_rgb", "s_flux", STAR_GAIN * MW_STAR_GAIN, 1)):
+        D, Cc, F = S[dk], S[ck], S[fk]
         el = np.arcsin(np.clip(D[:, 1], -1, 1))
-        w = star_weight(F, vis)
+        w = star_weight(F * (1.0 if tag == 0 else MW_STAR_GAIN), vis)
         keep = (w > 0.002) & (el > 0)
         if not keep.any():
             continue
         idx = np.nonzero(keep)[0]
         ext = _extinction(el[idx])
         tw = _twinkle(idx + tag * 1000000, tg, el[idx])
-        col = C[idx] * (w[idx] * ext * tw * e_mul)[:, None]
-        # the brightest stars are drawn a touch larger (they bloom on film)
-        br = np.clip(-2.5 * np.log10(np.maximum(F[idx], 1e-9)) , -8, 3)
-        size = 0.55 + 0.22 * np.clip(-br - 2.0, 0, 5) ** 0.7
+        col = Cc[idx] * (w[idx] * ext * tw * e_mul)[:, None]
+        m = np.clip(-2.5 * np.log10(np.maximum(F[idx], 1e-9)), -8, 3)
+        size = 0.5 + 0.20 * np.clip(-m - 1.5, 0, 5) ** 0.7 + 2.2 * (1.0 - w[idx]) ** 2
         R.draw_dirs(cam, D[idx], col.astype(np.float32), size_px=size.astype(np.float32), energy=energy)
     if mwv > 0:
-        D, C = S["g_dirs"], S["g_rgb"]
+        D, Cc = S["g_dirs"], S["g_rgb"]
         el = np.arcsin(np.clip(D[:, 1], -1, 1))
-        keep = el > 0.0
-        idx = np.nonzero(keep)[0]
+        idx = np.nonzero(el > 0.0)[0]
         ext = _extinction(el[idx])
-        col = C[idx] * (ext * mwv * 0.0055)[:, None]
-        R.draw_dirs(cam, D[idx], col.astype(np.float32), size_px=1.5, soft=True, energy=mw_energy)
+        col = Cc[idx] * (ext * mwv * MW_GLOW * S["g_mottle"][idx])[:, None]
+        R.draw_dirs(cam, D[idx], col.astype(np.float32), size_px=2.2 + 2.0 * (1 - mwv), soft=True, energy=mw_energy)
+
+
+STAR_GAIN = 0.55
+MW_STAR_GAIN = 0.30
+MW_GLOW = 0.045
 
 
 # ------------------------------------------------------------------------------------------ lights
@@ -1568,6 +1584,9 @@ def _nvec(code):
     return np.cos(ang), np.sin(ang)
 
 
+WIN_GAIN = 0.8
+
+
 def draw_windows(R, cam, zb, pw, energy=1.0, s_target=2.2):
     Wd = windows()
     idx, wlod = _select_tiles(cam, s_target)
@@ -1580,7 +1599,8 @@ def draw_windows(R, cam, zb, pw, energy=1.0, s_target=2.2):
     nx, nz = _nvec(code)
     vx = cam.pos[0] - P[:, 0]
     vz = cam.pos[2] - P[:, 2]
-    vn = np.sqrt(vx * vx + vz * vz) + 1e-6
+    vy = cam.pos[1] - P[:, 1]
+    vn = np.sqrt(vx * vx + vz * vz + vy * vy) + 1e-6
     face = (nx * vx + nz * vz) / vn
     keep = omni | (face > 0.02)
     x, y, z, coc, ok = cam.project(P)
@@ -1619,7 +1639,7 @@ def draw_windows(R, cam, zb, pw, energy=1.0, s_target=2.2):
     E = E * (wlod[k] * lv * f * _atten(d))[:, None] * _warm(d)
     live = lv > 0.002
     size = 0.55 + 0.5 * np.clip(1.0 - d / 2500.0, 0, 1)
-    _splat(R, x[k][live], y[k][live], size[live], (E[live] * energy).astype(np.float32))
+    _splat(R, x[k][live], y[k][live], size[live], (E[live] * (energy * WIN_GAIN)).astype(np.float32))
 
 
 POOL_L = 0.07          # peak road radiance under a unit lamp
@@ -1652,13 +1672,13 @@ def draw_lamps(R, cam, zb, pw, energy=1.0, pools=True):
             v = cam.pos[None] - Pp
             dist = np.linalg.norm(v, axis=1) + 1e-6
             sin_el = np.clip(v[:, 1] / dist, 0.02, 1.0)
-            rw = 0.85 * ph[pk]
+            rw = 0.85 * ph[pk] * np.where(Lm["E"][kk].sum(1) > 1.1, 1.45, 1.0)
             r1920 = rw * (cam.focal / 36.0 * 1920.0) / np.maximum(zp, 1e-3)     # pool radius, px @1920
             rr = r1920 * np.sqrt(sin_el)                                           # foreshortened blob
             m = _in_frame(cam, xp, yp, okp, 60) & _ztest(zb, xp, yp, zp, 0.01, 3.0) & (rr > 0.35)
             if m.any():
                 Ek = E[pk][m]
-                big = rr[m] > 2.5
+                big = rr[m] > 5.0
                 # small (distant) pools: one soft blob each; energy = radiance * blob area
                 sm = ~big
                 if sm.any():
@@ -1785,8 +1805,8 @@ def draw_traffic(R, cam, zb, pw, energy=1.0):
     dist = np.linalg.norm(v, axis=1)
     v /= dist[:, None] + 1e-9
     c = np.sum(dvec * v, axis=1)
-    fh = 0.05 + 0.95 * np.clip(c, 0, 1) ** 4
-    ft = 0.16 + 0.84 * np.clip(-c, 0, 1) ** 1.5
+    fh = 0.14 + 0.86 * np.clip(c, 0, 1) ** 4
+    ft = 0.30 + 0.70 * np.clip(-c, 0, 1) ** 1.5
     for off, col, f, sz in ((2.2, HEAD, fh, 0.7), (-2.2, TAIL, ft, 0.6)):
         Q = P + dvec * off
         xq, yq, zq, _, okq = cam.project(Q)
@@ -1807,16 +1827,25 @@ def draw_traffic(R, cam, zb, pw, energy=1.0):
 
 
 # ================================================================================================ render_env
-def ground_mask(cam, W, H, far=12000.0):
-    """1 where the view ray hits the ground plane within `far` metres."""
+GROUND_FAR = 12000.0
+SIL_L = 7000.0            # aerial perspective: silhouettes this far are veiled by the lit haze
+
+
+def ground_mask(cam, W, H, far=GROUND_FAR, return_dist=False):
+    """1 where the view ray hits the ground plane within `far` metres (+ the distance to it)."""
     ys = np.arange(H) + 0.5
     xs = np.arange(W) + 0.5
-    # the ground is covered where the ray's downward slope beats cam_height / far; test per pixel row/col
     xc = (xs - W * 0.5 - cam.shift[0]) / cam.fpx
     yc = -(ys - H * 0.5 + cam.shift[1]) / cam.fpx
     dy = (xc[None, :] * cam.right[1] + yc[:, None] * cam.up[1] + cam.fwd[1])
     dn = np.sqrt((xc[None, :] ** 2 + yc[:, None] ** 2 + 1.0))
-    return (dy / dn < -max(cam.pos[1], 0.5) / far).astype(np.float32)
+    s = dy / dn
+    h = max(cam.pos[1], 0.5)
+    m = (s < -h / far).astype(np.float32)
+    if not return_dist:
+        return m
+    dist = np.where(s < 0, h / np.maximum(-s, 1e-6), np.inf)
+    return m, np.minimum(dist, 1e7).astype(np.float32)
 
 
 # ================================================================================================ near solids
@@ -2063,7 +2092,7 @@ def draw_bulb(R, cam, zb, pw, energy=1.0):
 
 def render_env(R, cam, tg, W, H, sky=True, stars=True, city=True, roof=True, girl=False, pw=None,
                sky_energy=1.0, city_energy=1.0, star_energy=1.0, solid_energy=1.0, girl_pose=None,
-               spacing_px=2.2):
+               spacing_px=2.2, crowd=False):
     """Sky (glow dome / stars + Milky Way), the city and the rooftop set at global time tg.
 
     Returns (hdr, mask): mask = coverage of solid geometry (buildings, ground, rooftop set) so the
@@ -2081,20 +2110,28 @@ def render_env(R, cam, tg, W, H, sky=True, stars=True, city=True, roof=True, gir
     boxes = np.concatenate(parts) if parts else np.zeros((0, 8))
     zb = zbuffer(cam, boxes, W, H) if len(boxes) else np.full((H, W), np.inf)
     cover = np.isfinite(zb).astype(np.float32)
+    zfin = np.where(np.isfinite(zb), zb, 0.0)
+    veil = np.where(np.isfinite(zb), np.clip(np.exp(-zfin / SIL_L) * 1.1, 0.0, 1.0), 0.0).astype(np.float32)
     if city:
-        cover = np.maximum(cover, ground_mask(cam, W, H))
+        gm, gd = ground_mask(cam, W, H, return_dist=True)
+        cover = np.maximum(cover, gm)
+        veil = np.maximum(veil, gm * np.clip(np.exp(-gd / SIL_L) * 1.1, 0, 1))
     soft_cover = np.clip(cv2.GaussianBlur(cover, (0, 0), 0.5) * 1.15, 0, 1)
+    soft_veil = np.clip(cv2.GaussianBlur(veil, (0, 0), 0.5) * 1.1, 0, 1)
+    sky_img = np.zeros((H, W, 3), np.float32)
     if sky:
         draw_sky(R, cam, pw, energy=sky_energy)
+        sky_img += R.new_layer() * (1.0 - soft_veil)[..., None]
     if stars:
         draw_stars(R, cam, pw, energy=star_energy)
-    sky_img = R.new_layer() * (1.0 - soft_cover)[..., None]
+        sky_img += R.new_layer() * (1.0 - soft_cover)[..., None]
     if city:
         draw_lamps(R, cam, zb, pw, energy=city_energy)
         draw_windows(R, cam, zb, pw, energy=city_energy)
         draw_traffic(R, cam, zb, pw, energy=city_energy)
         draw_reflections(R, cam, zb, pw, energy=city_energy)
         draw_haze(R, cam, zb, pw, energy=city_energy)
+        draw_substation(R, cam, zb, pw, energy=city_energy)
     if roof or city:
         draw_bulb(R, cam, zb, pw, energy=city_energy)
     city_img = R.new_layer()
@@ -2184,7 +2221,7 @@ def haze_image(cam, zb, pw, down=4):
     vis = _ztest(zb, x[k], y[k], z[k], 0.02, 20.0) & (lv > 0.003)
     rr = np.clip(r, 0.8, 90.0)
     # blob energy in (px@1920)^2 radiance units: radiance ~ E / area
-    E = Hd["E"][k] * (HAZE_K * lv * near_fade * rr ** 2 / (1.0 + d / 6000.0))[:, None]
+    E = Hd["E"][k] * (HAZE_K * lv * near_fade * rr ** 2 / (1.0 + d / 25000.0))[:, None]
     sc = w2 / W                     # low-res px per full-res px
     s1920 = W / 1920.0              # full-res px per px@1920
     A = Accum(w2, h2)
@@ -2214,3 +2251,95 @@ def draw_haze(R, cam, zb, pw, energy=1.0, spacing_px=2.4):
     E = L * (mm * spacing_px ** 2)[:, None]
     live = L.max(axis=1) > 1e-6
     _splat(R, x[live], y[live], 0.9, (E[live] * energy).astype(np.float32))
+
+
+# ================================================================================================ the substation
+ARC_POS = SUBSTATION_POS + np.array([6.0, 25.0, -4.0])      # top of the line-termination gantry
+ARC_COL = hex_lin("#CFE6FF")
+
+
+def _substation_points():
+    """Lit steel of the substation: two lattice gantries, busbars, transformer tanks (dim, floodlit)."""
+    if "sub" not in _L:
+        rng = np.random.default_rng(41)
+        Ps = []
+        c = SUBSTATION_POS
+        for gx in (-14.0, 6.0):
+            for gz in (-10.0, 10.0):
+                n = 160
+                t = rng.random(n)
+                Ps.append(np.c_[np.full(n, c[0] + gx), t * 25.0, np.full(n, c[2] + gz)])
+            n = 120
+            t = rng.random(n)
+            Ps.append(np.c_[np.full(n, c[0] + gx), np.full(n, 24.0), c[2] - 10 + 20 * t])
+        for q in range(3):
+            n = 200
+            t = rng.random(n)
+            Ps.append(np.c_[c[0] - 14 + 20 * t, np.full(n, 16.0 + q * 2.5), np.full(n, c[2] - 6 + q * 6)])
+        for q in range(4):
+            n = 90
+            Ps.append(np.c_[c[0] - 20 + q * 11 + rng.uniform(-3, 3, n), rng.uniform(0, 5, n), c[2] + 18 + rng.uniform(-2.5, 2.5, n)])
+        _L["sub"] = np.concatenate(Ps).astype(np.float32)
+    return _L["sub"]
+
+
+def _sparks(tg):
+    """Ballistic sparks thrown by the arc (orange-white, fading)."""
+    t = tg - T_FLASH
+    out_P, out_E = [], []
+    for burst, t0, n in ((0, 0.0, 70), (1, 0.13, 40), (2, 0.245, 25)):
+        tt = t - t0
+        if tt <= 0 or tt > 1.6:
+            continue
+        rng = np.random.default_rng(700 + burst)
+        v = rng.normal(0, 1, (n, 3))
+        v /= np.linalg.norm(v, axis=1, keepdims=True)
+        spd = rng.uniform(6, 22, n)
+        v = v * spd[:, None] + np.array([0, 7.0, 0])
+        life = rng.uniform(0.4, 1.5, n)
+        drag = 1.8
+        f = (1 - np.exp(-drag * tt)) / drag
+        P = ARC_POS[None] + v * f + np.array([0, -4.9, 0]) * tt * tt
+        a = np.clip(1 - tt / life, 0, 1) ** 1.5
+        col = hex_lin("#FFD8A0")[None] * (1.5 + 3.0 * rng.random((n, 1))) * a[:, None]
+        out_P.append(P)
+        out_E.append(col)
+    if not out_P:
+        return np.zeros((0, 3)), np.zeros((0, 3))
+    return np.concatenate(out_P), np.concatenate(out_E)
+
+
+def draw_substation(R, cam, zb, pw, energy=1.0):
+    tg = pw["t"]
+    lv = float(level(tg, np.array([0]), 0.0)[0])
+    P = _substation_points()
+    x, y, z, coc, ok = cam.project(P)
+    m = _in_frame(cam, x, y, ok) & _ztest(zb, x, y, z, 0.01, 2.0)
+    if m.any():
+        d = z[m].astype(np.float64)
+        lit = 0.05 * lv + 25.0 * pw["flash"] + 0.6 * pw["burn"]
+        E = np.broadcast_to(hex_lin("#C8C0B0") * lit, (m.sum(), 3)) * _atten(d)[:, None]
+        _splat(R, x[m], y[m], 0.6, (E * energy).astype(np.float32))
+    fl, burn = pw["flash"], pw["burn"]
+    if fl > 0 or burn > 0:
+        x, y, z, coc, ok = cam.project(ARC_POS[None])
+        if ok[0]:
+            vis = bool(_ztest(zb, x, y, z, 0.01, 4.0)[0])
+            d = float(z[0])
+            a = _atten(np.array([d]))[0]
+            if vis:
+                R.draw(cam, ARC_POS[None], ARC_COL[None] * (900.0 * fl) * a, size_px=2.2, energy=energy)
+                R.draw(cam, ARC_POS[None], ARC_COL[None] * (220.0 * fl) * a, size_px=14.0, soft=True, energy=energy)
+                R.draw(cam, ARC_POS[None], hex_lin("#FF8A3A")[None] * (60.0 * burn) * a, size_px=3.0, soft=True,
+                       energy=energy)
+            # light scattered in the air around the arc is seen even when the arc itself is hidden
+            R.draw(cam, ARC_POS[None], ARC_COL[None] * (4000.0 * fl) * a, size=60.0, soft=True, energy=energy)
+            R.draw(cam, ARC_POS[None], hex_lin("#FF7A30")[None] * (900.0 * burn) * a, size=40.0, soft=True,
+                   energy=energy)
+    Ps, Es = _sparks(tg)
+    if len(Ps):
+        x, y, z, coc, ok = cam.project(Ps)
+        m = _in_frame(cam, x, y, ok) & _ztest(zb, x, y, z, 0.01, 2.0)
+        if m.any():
+            d = z[m].astype(np.float64)
+            _splat(R, x[m], y[m], 0.9, (Es[m] * _atten(d)[:, None] * energy).astype(np.float32))

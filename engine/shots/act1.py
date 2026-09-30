@@ -174,7 +174,7 @@ def I2(tl, tg, R, W, H):
 
 def I3(tl, tg, R, W, H):
     p = seg(tg, 41.0, 45.0)
-    base = CROWD_C + np.array([6.0 - 9.0 * p, 1.75, -24.0])
+    base = CROWD_C + np.array([3.0 - 3.0 * p, 1.75, -24.0])
     cam = Camera(base, base + np.array([-1.2, 0.35, 20.0]), focal=50, W=W, H=H, focus=26.0, bokeh=14)
     sky, m = ground_sky(R, cam, W, H, tg)
     draw_city(R, cam, tg, energy=0.7, lift=False, near_cut=400.0)
@@ -428,9 +428,9 @@ def I8(tl, tg, R, W, H):
         x, y, _, _, _ = cam.project(CSTAR[None])
         yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
         rr = np.sqrt((xx - x[0]) ** 2 + (yy - y[0]) ** 2) / W
-        f = np.exp(-(tg - tb) / 0.35)
-        glow = (np.exp(-rr / 0.12) * 6.0 + np.exp(-rr / 0.45) * 1.2) * f
-        full = 3.0 * np.exp(-(tg - tb) / 0.06)
+        f = np.exp(-(tg - tb) / 0.16)
+        glow = (np.exp(-rr / 0.10) * 5.0 + np.exp(-rr / 0.40) * 0.8) * f
+        full = 2.5 * np.exp(-(tg - tb) / 0.045)
         img = img + (glow + full)[..., None].astype(np.float32) * np.array([1.0, 0.88, 0.62], np.float32)
     w = ease_in(seg(tg, E_["front_pass"] - 0.35, E_["front_pass"] + 0.15), 2.0)
     img = img * (1 - w) + np.float32(w * 30.0) * np.array([1.0, 0.95, 0.85], np.float32)

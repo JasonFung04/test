@@ -16,13 +16,13 @@ from ..noise import fbm, hash01
 from ..sdf import rot, sample_surface, sd_ellipsoid, sd_round_box, sd_round_cone, sd_sphere, smin
 from ..solid import SolidCloud
 
-SKIN = np.array([0.105, 0.058, 0.036], np.float32)        # dark skin (linear albedo)
-SKIN_PALM = np.array([0.23, 0.13, 0.09], np.float32)      # lighter palmar skin
+SKIN = np.array([0.078, 0.042, 0.027], np.float32)        # dark skin (linear albedo)
+SKIN_PALM = np.array([0.17, 0.095, 0.066], np.float32)    # lighter palmar skin
 NAIL = np.array([0.20, 0.13, 0.105], np.float32)
 CRAYON = np.array([0.36, 0.055, 0.025], np.float32)       # red ochre, a little darker than the drawn line
 CRAYON_FACET = np.array([0.46, 0.08, 0.035], np.float32)
 
-HAND_VERSION = 4
+HAND_VERSION = 5
 
 
 def _cache(name, fn):
@@ -333,9 +333,26 @@ def grip():
         n_r = -n_r
     # thumb: its pad presses the crayon from the radial side, opposite the middle finger
     ttip = K + ax * 0.001 + _unit(n_r * 0.85 - n_d * 0.35) * (THUMB_R[3] + 0.0038)
-    tdir = _unit(ax * 0.35 + n_r * 0.75 + n_d * 0.15)
-    tip_ip = ttip + tdir * THUMB_L[2]
-    tmcp = _ik2(THUMB_CMC, tip_ip, THUMB_L[0], THUMB_L[1], [-1.0, -0.2, 0.3])
+    # distribute the bend evenly over the MCP and IP joints (a gentle arc, not a hook)
+    base = _unit(THUMB_CMC - ttip)
+    best = None
+    for side_w in (n_r, -n_d, n_d * 0.5 + n_r, -n_d * 0.5 + n_r):
+        side = _unit(side_w - base * (side_w @ base))
+        for a in np.radians(np.linspace(0.0, 70.0, 141)):
+            tdir = base * np.cos(a) + side * np.sin(a)
+            ip_ = ttip + tdir * THUMB_L[2]
+            if np.linalg.norm(ip_ - THUMB_CMC) > (THUMB_L[0] + THUMB_L[1]) * 0.999:
+                continue
+            mcp_ = _ik2(THUMB_CMC, ip_, THUMB_L[0], THUMB_L[1], side)
+            d0 = _unit(mcp_ - THUMB_CMC)
+            d1 = _unit(ip_ - mcp_)
+            d2 = _unit(ttip - ip_)
+            f1 = np.arccos(np.clip(d0 @ d1, -1, 1))
+            f2 = np.arccos(np.clip(d1 @ d2, -1, 1))
+            err = abs(f1 - f2) + 0.3 * (f1 + f2)
+            if best is None or err < best[0]:
+                best = (err, ip_, mcp_)
+    _, tip_ip, tmcp = best
     ch["thumb"] = [THUMB_CMC, tmcp, tip_ip, ttip]
     return dict(K=K, ax=ax, tip=tip, n_d=n_d, n_r=n_r, chains=ch)
 
@@ -698,3 +715,116 @@ def bead_cloud(n_per=900, seed=19):
     band = 0.5 + 0.5 * np.sin(P[:, 1] * 18.0)
     alb = alb * (0.8 + 0.2 * band)[:, None]
     return P.astype(np.float32), N.astype(np.float32), alb.astype(np.float32)
+
+
+# ------------------------------------------------------------------------------------ the figure
+# Body frame: origin on the floor under her pelvis, +z = the way she faces, +y up, +x = her left.
+LEATHER = np.array([0.16, 0.085, 0.045], np.float32)
+CLOAK = np.array([0.13, 0.075, 0.045], np.float32)
+BODY_VERSION = 2
+HEAD_AT = np.array([0.0, 0.770, 0.170])       # where the head frame origin sits (upright head)
+HEAD_PITCH = np.radians(34.0)                 # she looks down at the flake
+NECK_BASE = np.array([0.0, 0.628, 0.118])
+
+
+def body_sculpt():
+    S = Sculpt()
+    S.ell((0.0, 0.25, -0.02), (0.165, 0.110, 0.130))                                    # pelvis
+    S.cone((0.0, 0.30, 0.0), (0.0, 0.55, 0.085), 0.125, 0.130, k=0.05)                   # torso
+    S.ell((0.0, 0.49, 0.075), (0.150, 0.110, 0.095), k=0.05)                             # chest
+    S.ell((0.0, 0.600, 0.095), (0.185, 0.050, 0.075), k=0.05)                            # shoulders
+    S.cone((0.0, 0.595, 0.105), (0.0, 0.700, 0.150), 0.056, 0.050, k=0.03)               # neck
+    for sx in (1.0, -1.0):
+        S.cone((0.090 * sx, 0.25, 0.0), (0.100 * sx, 0.080, 0.360), 0.085, 0.056, k=0.04)     # thigh
+        S.sph((0.100 * sx, 0.070, 0.370), 0.056, k=0.02)                                     # knee
+        S.cone((0.100 * sx, 0.055, 0.370), (0.085 * sx, 0.048, -0.050), 0.050, 0.037, k=0.03)  # shin
+        S.cone((0.085 * sx, 0.045, -0.050), (0.080 * sx, 0.030, -0.200), 0.036, 0.024, k=0.02)  # foot
+    # right arm (her right = -x) reaching down to the flake, left hand resting on the left knee
+    S.cone((-0.170, 0.595, 0.095), (-0.190, 0.405, 0.255), 0.046, 0.037, k=0.03)
+    S.cone((-0.190, 0.405, 0.255), (-0.090, 0.150, 0.440), 0.036, 0.027, k=0.015)
+    S.ell((-0.070, 0.090, 0.480), (0.030, 0.050, 0.020), _rx(-0.6), k=0.012)
+    S.cone((0.170, 0.595, 0.095), (0.205, 0.400, 0.235), 0.046, 0.037, k=0.03)
+    S.cone((0.205, 0.400, 0.235), (0.120, 0.190, 0.390), 0.036, 0.027, k=0.015)
+    S.ell((0.105, 0.140, 0.430), (0.032, 0.048, 0.020), _rx(-0.9), k=0.012)
+    return S
+
+
+def wrap_sculpt():
+    """Hide wrapped around the hips and thighs."""
+    S = Sculpt()
+    S.ell((0.0, 0.215, 0.07), (0.192, 0.108, 0.245))
+    return S
+
+
+def cloak_sculpt():
+    """A hide cloak over the shoulders and back, open at the front."""
+    S = Sculpt()
+    S.ell((0.0, 0.47, -0.035), (0.205, 0.215, 0.150))
+    S.ell((0.0, 0.600, 0.060), (0.215, 0.070, 0.105), k=0.04)
+    S.ell((0.0, 0.56, 0.21), (0.30, 0.30, 0.10), k=0.02, sub=True)                       # open front
+    return S
+
+
+class Figure:
+    """The kneeling drawer (II4 wide shot and the shoulders/necklace in II6)."""
+
+    def __init__(self, spacing=0.0022):
+        def make():
+            out = {}
+            P, N, a = body_sculpt().sample(spacing, seed=91, max_seeds=2_000_000)
+            out["bP"], out["bN"], out["ba"] = P, N, a
+            P, N, a = wrap_sculpt().sample(spacing, seed=92, max_seeds=400_000)
+            out["wP"], out["wN"], out["wa"] = P, N, a
+            P, N, a = cloak_sculpt().sample(spacing, seed=93, max_seeds=600_000)
+            out["cP"], out["cN"], out["ca"] = P, N, a
+            return out
+        self.d = _cache(f"figure_v{BODY_VERSION}", make)
+        d = self.d
+        rng = np.random.default_rng(94)
+        self.balb = (SKIN * (0.85 + 0.3 * rng.random(len(d["bP"])))[:, None]).astype(np.float32)
+        wsd = wrap_sculpt().sdf_fast(d["bP"].astype(np.float64))
+        csd = cloak_sculpt().sdf_fast(d["bP"].astype(np.float64))
+        self.bkeep = (wsd > 0.003) & (csd > 0.003)                  # skin hidden under the hides
+        self.walb = (LEATHER * (0.8 + 0.4 * fbm(d["wP"] * 30.0, octaves=3) + 0.2)[:, None]).astype(np.float32)
+        self.calb = (CLOAK * (0.75 + 0.5 * rng.random(len(d["cP"])) ** 2)[:, None]).astype(np.float32)
+        bsd = body_sculpt().sdf_fast(d["cP"].astype(np.float64))
+        self.ckeep = bsd > 0.002
+
+    @staticmethod
+    def head_placement(pitch=HEAD_PITCH):
+        """Rotation and translation of the head frame into the body frame."""
+        Rh = rot("x", pitch)
+        piv = HEAD_AT + NECK_PIVOT
+        T = piv - Rh @ NECK_PIVOT
+        return Rh, T
+
+    def clouds(self, Rm, T):
+        """Body, wrap, cloak as SolidClouds placed by (Rm, T)."""
+        d = self.d
+        R32 = np.asarray(Rm, np.float32)
+        T32 = np.asarray(T, np.float32)
+        out = []
+        for P, N, a, alb, keep, seed in ((d["bP"], d["bN"], d["ba"], self.balb, self.bkeep, 95),
+                                         (d["wP"], d["wN"], d["wa"], self.walb, None, 96),
+                                         (d["cP"], d["cN"], d["ca"], self.calb, self.ckeep, 97)):
+            if keep is not None:
+                P, N, alb = P[keep], N[keep], alb[keep]
+            out.append(SolidCloud(P @ R32.T + T32, N @ R32.T, alb, area=a,
+                                  key=hash01(np.arange(len(P)), seed).astype(np.float32)))
+        return out
+
+
+def beads_world(Rm, T, n_per=260):
+    """The necklace (body frame -> placed): bead points, normals, albedo, bead centres."""
+    C, F, S = necklace()
+    # necklace() is in the (upright) neck frame around y=-0.175; move it onto the body's neck base
+    C = C - np.array([0.0, -0.175, -0.030]) + NECK_BASE + np.array([0.0, -0.012, 0.0])
+    bp, bn, ba = bead_cloud(n_per)
+    Ps, Ns, As = [], [], []
+    for c, f, s in zip(C, F, S):
+        Ps.append(c + (bp * s) @ f.T)
+        Ns.append(bn @ f.T)
+        As.append(ba)
+    P = np.concatenate(Ps) @ np.asarray(Rm).T + T
+    N = np.concatenate(Ns) @ np.asarray(Rm).T
+    return P.astype(np.float32), N.astype(np.float32), np.concatenate(As).astype(np.float32), C @ np.asarray(Rm).T + T

@@ -289,6 +289,24 @@ def ochre_glints(cl, cov, cam, fire_pos, tg, strength=6.0):
     return P[m], (hex_lin("#FFB27A")[None, :] * e[m, None]).astype(np.float32)
 
 
+def draw_ground(R, cam, cl, lights, energy=1.0, fill=0.55, max_px=14.0):
+    """A dim, calm ground: every sample is a dot sized to its own footprint (no bright specks where
+    the sampling is sparse), shaded like a solid."""
+    from ..solid import shade
+    x, y, z, coc, valid = cam.project(cl.P)
+    keep = valid & (x > -30) & (x < R.W + 30) & (y > -30) & (y < R.H + 30)
+    idx = np.nonzero(keep)[0]
+    if idx.size == 0:
+        return
+    sub = cl.subset(idx)
+    rad = shade(sub, cam.pos, lights)
+    native = np.sqrt(sub.area) * cam.fpx / np.maximum(z[idx], 1e-6)          # px at this resolution
+    area_px = (native / R.s) ** 2
+    e = rad * area_px[:, None] * energy
+    r = np.minimum(native / R.s * fill, max_px)
+    R.draw(cam, sub.P, e.astype(np.float32), size_px=r.astype(np.float32))
+
+
 def draw_flake(R, cam, tg, lights, spacing=2.2, occlude=True, floor=True):
     top, side, flo, cov = flake().cloud(tg)
     cl = SolidCloud.concat([top, side])
@@ -296,15 +314,16 @@ def draw_flake(R, cam, tg, lights, spacing=2.2, occlude=True, floor=True):
                size_var=0.3, occlude=occlude)
     if floor:
         # the floor: calm, dark, a touch out of focus -- never glitter
-        draw_solid(R, cam, flo, lights, spacing_px=spacing * 1.3, seurat=0.0, jitter=0.05, size_var=0.2,
-                   occlude=occlude, energy=0.8)
+        draw_ground(R, cam, flo, lights, energy=0.8)
     return top, cov
 
 
 # ============================================================================ II5 / II7 — the hand
 RHYME_ANCHOR = (0.60, 0.56)            # same screen anchor as the elder's palm in I5 (act1.palm_screen_anchor)
-WRIST_DIR = np.array([0.55, 0.45, 0.70])         # from the crayon tip toward her wrist (flake space)
-PSI = np.radians(300.0)                          # roll: crayon ~61 deg, back of the hand to the camera
+WRIST_DIR = np.array([0.55, 0.40, 0.73])         # from the crayon tip toward her wrist (flake space)
+PSI = np.radians(280.0)                          # roll of the grip about the wrist direction
+HAND_CAM = np.array([-0.300, 0.550, 0.350])      # camera position (flake space), her left-front
+WRIST_SCREEN_DEG = 38.0                          # the wrist leaves the frame toward the lower right
 
 
 def hand():
@@ -333,17 +352,31 @@ def _smooth_tip(tg, half=0.7, n=21):
     return (Q * w[:, None]).sum(0) / w.sum()
 
 
+def _hand_roll():
+    """Camera roll that puts the tip->wrist direction at WRIST_SCREEN_DEG below screen-right (the I5
+    rhyme: wrist toward the lower-right corner, fingers toward the upper-left). Constant per setup."""
+    def make():
+        Rm, T = hand().placement_wrist(np.zeros(3), WRIST_DIR, PSI)
+        wrist = Rm @ hand().WRIST + T
+        cam = Camera(HAND_CAM, np.zeros(3), up=(0.0, 1.0, 0.0), focal=100)
+        x, y, _, _, _ = cam.project(np.stack([np.zeros(3), wrist]))
+        ang = np.degrees(np.arctan2(y[1] - y[0], x[1] - x[0]))     # screen angle, y down
+        return np.radians(WRIST_SCREEN_DEG - ang)
+    return _get("hand_roll", make)
+
+
 def hand_camera(tg, W, H, seed, pinch=None):
-    """100 mm from her left-front, looking down ~55 deg; the view gently follows the crayon; focus on
-    the fingertips (the pinch); lens shift puts the followed point on the shared hand-rhyme anchor."""
+    """100 mm from her left-front, looking down ~55 deg, rolled for the hand rhyme; the view gently
+    follows the crayon; focus on the fingertips (the pinch); lens shift puts the followed point on the
+    shared hand-rhyme anchor."""
     centre = np.array([0.0, 0.0, -0.004])
     follow = centre + 0.5 * (_smooth_tip(tg) - centre)
-    pos = np.array([-0.032, 0.505, 0.350]) + handheld(tg, 0.0016, seed=seed)
+    pos = HAND_CAM + handheld(tg, 0.0016, seed=seed)
     look = follow + handheld(tg + 3.0, 0.0008, seed=seed + 1)
     if pinch is None:
         pinch = FL.to_flake(FL.tip(tg)[1])[0]
     focus = float(np.linalg.norm(pos - pinch))
-    kw = dict(up=(0.0, 1.0, 0.0), focal=100, focus=focus, bokeh=60.0, W=W, H=H)
+    kw = dict(up=(0.0, 1.0, 0.0), focal=100, focus=focus, bokeh=60.0, W=W, H=H, roll=_hand_roll())
     cam = Camera(pos, look, **kw)
     ax, ay = RHYME_ANCHOR[0] * W, RHYME_ANCHOR[1] * H
     return Camera(pos, look, shift=((ax - W / 2) / cam.s, -(ay - H / 2) / cam.s), **kw)
@@ -417,7 +450,7 @@ def _drawing_shot(tl, tg, R, W, H, seed):
     flo.albedo *= (1.0 - 0.85 * dark_f)[:, None].astype(np.float32)
     draw_solid(R, cam, SolidCloud.concat([top, side]), lights, spacing_px=2.2, seurat=0.25, p_min=0.35,
                jitter=0.08, size_var=0.3)
-    draw_solid(R, cam, flo, lights, spacing_px=2.8, seurat=0.0, jitter=0.05, size_var=0.2, energy=0.8)
+    draw_ground(R, cam, flo, lights, energy=0.8)
     g = ochre_glints(top, cov, cam, fire_pos, tg)
     if g is not None:
         R.draw(cam, g[0], g[1], size_px=0.7)
@@ -425,7 +458,7 @@ def _drawing_shot(tl, tg, R, W, H, seed):
     mask = coverage_dof(R, cam, [hcl, ccl])
     # the hand: dark skin, backlit by the fire -> rim + sheen; the crayon
     rim = (FIRE.LIGHT * 0.05 * FIRE.flicker(tg), 3.0, 1.0)
-    draw_solid(R, cam, hcl, lights, spacing_px=1.9, seurat=0.55, p_min=0.10, jitter=0.10, spec=(0.07, 14.0),
+    draw_solid(R, cam, hcl, lights, spacing_px=1.8, seurat=0.35, p_min=0.30, jitter=0.08, spec=(0.09, 16.0),
                rim=None, size_var=0.3)
     draw_solid(R, cam, ccl, lights, spacing_px=1.6, seurat=0.3, p_min=0.3, jitter=0.12, spec=(0.03, 8.0))
     return bg * (1.0 - mask)[..., None] + R.resolve(), Grade(**GRADE_CAVE)
