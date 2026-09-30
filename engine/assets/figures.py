@@ -340,6 +340,8 @@ def elder_head_sdf(p):
     d = smin(d, sd_ellipsoid(p, (0, 1.925, 0.030), (0.040, 0.060, 0.045)), 0.025)
     for sx in (1, -1):
         d = smax(d, -sd_ellipsoid(p, (0.020 * sx, 1.950, 0.070), (0.012, 0.008, 0.010)), 0.006)
+    d = smin(d, sd_round_cone(p, (0, 1.968, 0.064), (0, 1.915, 0.084), 0.009, 0.012), 0.012)   # brow-nose ridge
+    d = smin(d, sd_ellipsoid(p, (0, 1.975, 0.055), (0.036, 0.010, 0.014)), 0.01)              # brow
     d = d + 0.004 * fbm(p * 45.0, octaves=2)
     return d
 
@@ -363,7 +365,7 @@ class Elder:
                                      int(30_000 * density), seed=22)
             out["head_P"], out["head_N"], out["head_a"] = P, N, np.float32(a)
             return out
-        self.d = _cache(f"elder2_{density}", make)
+        self.d = _cache(f"elder3_{density}", make)
         rng = np.random.default_rng(7)
         self.key_body = rng.random(self.d["body_P"].shape[0]).astype(np.float32)
         self.key_head = rng.random(self.d["head_P"].shape[0]).astype(np.float32)
@@ -516,3 +518,94 @@ def elder_points(pose, cam, t, dissolve=0.0, shed=0.04, energy=1.0, spacing_px=2
         P2 = np.where(rel[:, None], lift, P2)
         e = e * np.where(rel, (1 - age) ** 1.2, 1.0)[:, None]
     return P2.astype(np.float32), e.astype(np.float32)
+
+
+class ElderHand:
+    """Sculpted long-fingered hand for extreme close-ups (I5 and the climax palm).
+
+    Local frame: wrist at the origin, fingers along -y, palm normal +z. Each phalanx is sampled
+    in its own joint frame so the fingers can curl/open without re-sampling."""
+
+    KNUCKLES = [(-0.029, -0.098), (-0.0098, -0.104), (0.0098, -0.102), (0.028, -0.094)]
+    LENGTHS = [(0.052, 0.040, 0.031), (0.060, 0.046, 0.035), (0.058, 0.044, 0.034), (0.047, 0.036, 0.028)]
+    RADII = [(0.0098, 0.0082, 0.0070, 0.0058), (0.0104, 0.0088, 0.0074, 0.0060),
+             (0.0102, 0.0086, 0.0072, 0.0059), (0.0090, 0.0076, 0.0065, 0.0054)]
+
+    def __init__(self, density=1.0):
+        def make():
+            out = {}
+
+            def palm(p):
+                d = sd_ellipsoid(p, (0.0, -0.052, 0.0), (0.043, 0.058, 0.0135))
+                d = smin(d, sd_ellipsoid(p, (0.024, -0.032, 0.006), (0.020, 0.030, 0.014)), 0.012)   # thenar
+                d = smin(d, sd_ellipsoid(p, (-0.02, -0.03, 0.004), (0.02, 0.03, 0.012)), 0.012)      # hypothenar
+                d = smin(d, sd_capsule(p, (0, 0.02, 0), (0, -0.01, 0), 0.020), 0.02)                 # wrist
+                for kx, ky in ElderHand.KNUCKLES:
+                    d = smin(d, sd_sphere(p, (kx, ky + 0.004, 0.0), 0.0105), 0.010)
+                return d + 0.0012 * fbm(p * 160.0, octaves=2)
+            P, N, a = sample_surface(palm, (-0.07, -0.13, -0.03), (0.07, 0.05, 0.03), int(60_000 * density), seed=61)
+            out["palm_P"], out["palm_N"], out["palm_a"] = P, N, np.float32(a)
+            for f in range(4):
+                for k in range(3):
+                    L = ElderHand.LENGTHS[f][k]
+                    r1, r2 = ElderHand.RADII[f][k], ElderHand.RADII[f][k + 1]
+
+                    def seg(p, L=L, r1=r1, r2=r2):
+                        return sd_round_cone(p, (0, 0, 0), (0, -L, 0), r1, r2) + 0.0008 * fbm(p * 200.0, octaves=2)
+                    R_ = r1 + 0.006
+                    P, N, a = sample_surface(seg, (-R_, -L - R_, -R_), (R_, R_, R_), int(9_000 * density),
+                                             seed=70 + f * 3 + k)
+                    out[f"f{f}{k}_P"], out[f"f{f}{k}_N"], out[f"f{f}{k}_a"] = P, N, np.float32(a)
+            for k, (L, r1, r2) in enumerate(((0.050, 0.0118, 0.0092), (0.040, 0.0092, 0.0066))):
+                def seg(p, L=L, r1=r1, r2=r2):
+                    return sd_round_cone(p, (0, 0, 0), (0, -L, 0), r1, r2)
+                R_ = r1 + 0.006
+                P, N, a = sample_surface(seg, (-R_, -L - R_, -R_), (R_, R_, R_), int(9_000 * density), seed=90 + k)
+                out[f"t{k}_P"], out[f"t{k}_N"], out[f"t{k}_a"] = P, N, np.float32(a)
+            return out
+        self.d = _cache(f"elderhand_{density}", make)
+        rng = np.random.default_rng(12)
+        self.keys = {k[:-2]: rng.random(self.d[k].shape[0]).astype(np.float32) for k in self.d if k.endswith("_P")}
+
+    def pose(self, curl=0.0, spread=0.3):
+        """Hand-local points. curl 0 = open flat, 1 = closed; fingers bend toward +z (the palm side)."""
+        d = self.d
+        Ps, Ns, As, Ks = [d["palm_P"]], [d["palm_N"]], [np.full(len(d["palm_P"]), d["palm_a"])], [self.keys["palm"]]
+        for f, (kx, ky) in enumerate(self.KNUCKLES):
+            pos = np.array([kx, ky, 0.0])
+            Rf = rot("z", (f - 1.5) * spread * 0.12)
+            for k in range(3):
+                Rf = Rf @ rot("x", -curl * (0.95 + 0.35 * k))
+                Ps.append(d[f"f{f}{k}_P"] @ Rf.T + pos)
+                Ns.append(d[f"f{f}{k}_N"] @ Rf.T)
+                As.append(np.full(len(d[f"f{f}{k}_P"]), d[f"f{f}{k}_a"]))
+                Ks.append(self.keys[f"f{f}{k}"])
+                pos = pos + Rf @ np.array([0, -self.LENGTHS[f][k], 0])
+        pos = np.array([0.034, -0.026, 0.008])
+        Rt = rot("z", 0.95 + spread * 0.35) @ rot("y", -0.35)
+        for k in range(2):
+            Rt = Rt @ rot("x", -curl * 0.7)
+            Ps.append(d[f"t{k}_P"] @ Rt.T + pos)
+            Ns.append(d[f"t{k}_N"] @ Rt.T)
+            As.append(np.full(len(d[f"t{k}_P"]), d[f"t{k}_a"]))
+            Ks.append(self.keys[f"t{k}"])
+            pos = pos + Rt @ np.array([0, -(0.050, 0.040)[k], 0])
+        return (np.concatenate(Ps).astype(np.float32), np.concatenate(Ns).astype(np.float32),
+                np.concatenate(As).astype(np.float32), np.concatenate(Ks).astype(np.float32))
+
+    def palm_center(self):
+        return np.array([0.0, -0.055, 0.014])
+
+
+def hand_pose_dict(hand, Rm, origin, curl, spread=0.3):
+    """World-space pose dict for elder_points from an ElderHand."""
+    P, N, A, K = hand.pose(curl, spread)
+    Rm = np.asarray(Rm)
+    Pw = P @ Rm.T + origin
+    Nw = N @ Rm.T
+    u = hash01(np.arange(len(P)), 93)[:, None]
+    col = (ELDER_CORE * 0.55 + ELDER_EDGE * 0.45) * (0.75 + 0.5 * u)
+    col = np.where(K[:, None] < 0.08, ELDER_EDGE * 0.9, col)
+    col = np.where(K[:, None] > 0.94, ELDER_CORE * 1.3, col).astype(np.float32)
+    return dict(P=Pw.astype(np.float32), N=Nw.astype(np.float32), col=col, area=A, key=K,
+                part=np.zeros(len(P), np.int16))

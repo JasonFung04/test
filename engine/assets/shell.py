@@ -338,7 +338,7 @@ def _finish(n, lv, kk, C, R, B, cpos, fpx_ref, dl, lmax, t, energy, thickness, l
         mu = min(1.0, abs(facing))
         rim = 1.0 + limb * (1.0 - mu) ** 3
         beam = (1.0 - beaming) + beaming * _sm((facing + 0.25) / 0.5)
-        g = min(1.0, g + 0.55 * (1.0 - mu) ** 8)
+        g = min(1.0, g + (1.0 - mu) ** 5)
         tw = 1.0 + twinkle * np.sin(2.0 * np.pi * (_rnd(key, salt + 6) + t * (0.25 + 0.5 * _rnd(key, salt + 7))))
         e = energy * (R * R / sig) * (fpx_ref / r) ** 2 * w * b * np.exp(-0.9 * depth) * rim * beam * tw
         P_out[p, 0] = px
