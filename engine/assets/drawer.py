@@ -447,6 +447,26 @@ class Hand:
         T = np.asarray(tip_world, float) - Rm @ self.tip
         return Rm, T
 
+    WRIST = np.array([0.002, 0.0, -0.002])
+
+    def placement_wrist(self, tip_world, wrist_dir, psi):
+        """Rm, T with the crayon tip at tip_world, the hand's tip->wrist direction along wrist_dir, and
+        the crayon rolled by psi (rad) about that direction (psi=0: crayon leans toward +x x wrist)."""
+        w_h = _unit(self.WRIST - self.tip)
+        a_h = _unit(self.ax)
+        ang = np.arccos(np.clip(w_h @ a_h, -1, 1))
+
+        def frame(w, a):
+            a2 = _unit(a - w * (a @ w))
+            return np.stack([w, a2, np.cross(w, a2)], 1)
+        w_w = _unit(wrist_dir)
+        u1 = _unit(np.cross(w_w, [0.0, 1.0, 0.0]))
+        u2 = np.cross(w_w, u1)
+        a_w = np.cos(ang) * w_w + np.sin(ang) * (np.cos(psi) * u1 + np.sin(psi) * u2)
+        Rm = frame(w_w, a_w) @ frame(w_h, a_h).T
+        T = np.asarray(tip_world, float) - Rm @ self.tip
+        return Rm, T
+
     def clouds(self, Rm, T):
         Rm32 = np.asarray(Rm, np.float32)
         T32 = np.asarray(T, np.float32)

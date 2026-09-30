@@ -303,8 +303,8 @@ def draw_flake(R, cam, tg, lights, spacing=2.2, occlude=True, floor=True):
 
 # ============================================================================ II5 / II7 — the hand
 RHYME_ANCHOR = (0.60, 0.56)            # same screen anchor as the elder's palm in I5 (act1.palm_screen_anchor)
-CRAYON_AXIS = np.array([0.36, 0.80, 0.48])       # tip -> back, flake space (up, right, toward her)
-DORSAL = np.array([0.30, 1.0, -0.30])
+WRIST_DIR = np.array([0.55, 0.45, 0.70])         # from the crayon tip toward her wrist (flake space)
+PSI = np.radians(300.0)                          # roll: crayon ~61 deg, back of the hand to the camera
 
 
 def hand():
@@ -314,16 +314,16 @@ def hand():
 def hand_pose(tg):
     """Rm, T of the hand at tg: the crayon tip rides the scheduled stroke path (flake.tip)."""
     k, q, lift = FL.tip(tg)
-    p = FL.to_flake(q)[0] + np.array([0.004, 0.011, 0.007]) * lift
-    ax = CRAYON_AXIS / np.linalg.norm(CRAYON_AXIS)
-    # the wrist leans a little into each pull (strokes 0-5 pull toward her, 6-8 sweep right)
+    p = FL.to_flake(q)[0] + np.array([0.004, 0.010, 0.008]) * lift
+    wd = WRIST_DIR / np.linalg.norm(WRIST_DIR)
+    psi = PSI
+    # the wrist leans into each stroke; a living hand trembles a little
     if k >= 0:
-        lean = np.array([0.0, 0.0, 0.10]) if k < 6 else np.array([0.10, 0.0, 0.0])
-        ax = ax + lean
-    ax = ax / np.linalg.norm(ax)
-    # tiny tremor of a living hand
-    ax = ax + np.array([FIRE._n1(tg, 1.7, 21), FIRE._n1(tg, 1.3, 22), FIRE._n1(tg, 1.1, 23)]) * 0.012
-    return hand().placement(p, ax, DORSAL), k, p, lift
+        u = float(np.clip((tg - FL.stroke_times()[k][0]) / FL.stroke_times()[k][1], 0, 1))
+        psi += np.radians(4.0) * np.sin(np.pi * u)
+        wd = wd + (np.array([0.0, 0.0, 0.06]) if k < 6 else np.array([0.06, 0.0, 0.0])) * np.sin(np.pi * u)
+    wd = wd + np.array([FIRE._n1(tg, 1.7, 21), FIRE._n1(tg, 1.3, 22), FIRE._n1(tg, 1.1, 23)]) * 0.010
+    return hand().placement_wrist(p, wd, psi), k, p, lift
 
 
 def _smooth_tip(tg, half=0.7, n=21):
@@ -333,20 +333,20 @@ def _smooth_tip(tg, half=0.7, n=21):
     return (Q * w[:, None]).sum(0) / w.sum()
 
 
-def hand_camera(tg, W, H, seed):
-    """Over her left shoulder, 100 mm; the view gently follows the crayon; lens shift puts the
-    followed point on the shared hand-rhyme anchor."""
+def hand_camera(tg, W, H, seed, pinch=None):
+    """100 mm from her left-front, looking down ~55 deg; the view gently follows the crayon; focus on
+    the fingertips (the pinch); lens shift puts the followed point on the shared hand-rhyme anchor."""
     centre = np.array([0.0, 0.0, -0.004])
-    follow = centre + 0.55 * (_smooth_tip(tg) - centre)
-    pos = np.array([-0.075, 0.335, 0.245]) + handheld(tg, 0.0012, seed=seed)
-    look = follow + handheld(tg + 3.0, 0.0006, seed=seed + 1)
-    k, q, lift = FL.tip(tg)
-    tipw = FL.to_flake(q)[0]
-    focus = float(np.linalg.norm(pos - tipw))
-    cam = Camera(pos, look, up=(0.0, 1.0, 0.0), focal=100, focus=focus, bokeh=46.0, W=W, H=H)
+    follow = centre + 0.5 * (_smooth_tip(tg) - centre)
+    pos = np.array([-0.032, 0.505, 0.350]) + handheld(tg, 0.0016, seed=seed)
+    look = follow + handheld(tg + 3.0, 0.0008, seed=seed + 1)
+    if pinch is None:
+        pinch = FL.to_flake(FL.tip(tg)[1])[0]
+    focus = float(np.linalg.norm(pos - pinch))
+    kw = dict(up=(0.0, 1.0, 0.0), focal=100, focus=focus, bokeh=60.0, W=W, H=H)
+    cam = Camera(pos, look, **kw)
     ax, ay = RHYME_ANCHOR[0] * W, RHYME_ANCHOR[1] * H
-    return Camera(pos, look, up=(0.0, 1.0, 0.0), focal=100, focus=focus, bokeh=46.0, W=W, H=H,
-                  shift=((ax - W / 2) / cam.s, -(ay - H / 2) / cam.s))
+    return Camera(pos, look, shift=((ax - W / 2) / cam.s, -(ay - H / 2) / cam.s), **kw)
 
 
 def shadow_on_plane(P, light, res=0.00025, extent=0.10, blur_k=0.02):
@@ -402,8 +402,9 @@ def coverage_dof(R, cam, clouds, spacing_px=1.6):
 
 
 def _drawing_shot(tl, tg, R, W, H, seed):
-    cam = hand_camera(tg, W, H, seed)
     (Rm, T), k, tipw, lift = hand_pose(tg)
+    pinch = Rm @ hand().g["K"] + T
+    cam = hand_camera(tg, W, H, seed, pinch=pinch)
     hcl, ccl = hand().clouds(Rm, T)
     fire_pos = FIRE_IN_FLAKE + FIRE.light_offset(tg)
     lights = fire_lights(tg, FIRE_IN_FLAKE)
@@ -424,9 +425,9 @@ def _drawing_shot(tl, tg, R, W, H, seed):
     mask = coverage_dof(R, cam, [hcl, ccl])
     # the hand: dark skin, backlit by the fire -> rim + sheen; the crayon
     rim = (FIRE.LIGHT * 0.05 * FIRE.flicker(tg), 3.0, 1.0)
-    draw_solid(R, cam, hcl, lights, spacing_px=1.9, seurat=0.55, p_min=0.10, jitter=0.10, spec=(0.35, 18.0),
+    draw_solid(R, cam, hcl, lights, spacing_px=1.9, seurat=0.55, p_min=0.10, jitter=0.10, spec=(0.07, 14.0),
                rim=None, size_var=0.3)
-    draw_solid(R, cam, ccl, lights, spacing_px=1.6, seurat=0.3, p_min=0.3, jitter=0.1, spec=(0.25, 12.0))
+    draw_solid(R, cam, ccl, lights, spacing_px=1.6, seurat=0.3, p_min=0.3, jitter=0.12, spec=(0.03, 8.0))
     return bg * (1.0 - mask)[..., None] + R.resolve(), Grade(**GRADE_CAVE)
 
 

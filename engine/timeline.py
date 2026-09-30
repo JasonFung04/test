@@ -43,8 +43,8 @@ CARDS = [
          en="The oldest known drawing · c. 73,000 years ago · Blombos Cave, South Africa"),
     dict(id="C7", t0=125.3, t1=130.8, cn="人类的全部历史，都发生在这束光的途中。",
          en="All of human history happened while this light was on its way."),
-    dict(id="C10a", t0=211.0, t1=217.2, y=0.60, cn="他们不知道我们会存在。", en="They did not know we would exist."),
-    dict(id="C10b", t0=214.0, t1=217.2, y=0.77, fin=1.0, cn="他们还是寄出了。", en="They sent it anyway."),
+    dict(id="C10a", t0=211.0, t1=217.2, y=0.36, cn="他们不知道我们会存在。", en="They did not know we would exist."),
+    dict(id="C10b", t0=214.0, t1=217.2, y=0.53, fin=1.0, cn="他们还是寄出了。", en="They sent it anyway."),
 ]
 
 # ---------------------------------------------------------------- opening typing

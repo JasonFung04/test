@@ -289,11 +289,11 @@ _BRIDGES = [(0.12, 11.0), (0.205, 12.0), (0.285, 12.0), (0.335, 13.0), (0.395, 1
             (0.545, 12.0), (0.63, 11.0), (0.72, 11.0), (0.83, 10.0)]
 
 # special buildings: the girl's block and the tall block the III3 camera stands on
-PERCH_C = np.array([-362.0, -1356.0])      # (x, z)
+PERCH_C = np.array([-374.3, -1330.6])      # (x, z): one row north of her block, 10 storeys
 SPECIAL = [
     # x, z, a, b, yaw, floors, floor_h, type, tag   (tag 1 = girl's block, 2 = perch)
     (ROOF_ORIGIN[0], ROOF_ORIGIN[2], 12.0, 6.0, ROOF_YAW, 7, 3.0, T_OLD, 1),
-    (PERCH_C[0], PERCH_C[1], 14.0, 7.0, ROOF_YAW, 13, 3.0, T_NEW, 2),
+    (PERCH_C[0], PERCH_C[1], 16.0, 6.0, ROOF_YAW, 10, 3.0, T_OLD, 2),
 ]
 
 
@@ -738,7 +738,7 @@ def _build_lamps():
             pitch, hh, inten, sides = 30.0, 10.0, 0.62, (-14.0, 14.0)
             col = LED if _h1(i, 5) < led_frac.get(typ, 0.3) else SODIUM
         elif cls == 2:
-            pitch, hh, inten, sides = 34.0, 8.0, 0.30, (-7.0, 7.0)
+            pitch, hh, inten, sides = 30.0, 8.0, 0.42, (-7.0, 7.0)
             col = LED * 0.9 if _h1(i, 6) < led_frac.get(typ, 0.3) else SODIUM
         elif cls == 5:
             pitch, hh, inten, sides = 24.0, 3.5, 0.10, (1.5,)
@@ -798,7 +798,7 @@ def _build_windows():
     eu = np.stack([np.cos(yaw), -np.sin(yaw)], 1)
     ev = np.stack([-np.sin(yaw), -np.cos(yaw)], 1)
     pitch = np.select([typ == T_OLD, typ == T_NEW, typ == T_CBD, typ == T_IND], [3.6, 3.5, 3.2, 10.0], 3.7)
-    p_lit = np.select([typ == T_OLD, typ == T_NEW, typ == T_CBD, typ == T_IND], [0.36, 0.33, 0.40, 0.12], 0.30)
+    p_lit = np.select([typ == T_OLD, typ == T_NEW, typ == T_CBD, typ == T_IND], [0.50, 0.40, 0.42, 0.14], 0.42)
     p_lit = p_lit * (0.7 + 0.6 * rng.random(nb)) * np.clip(1.15 - r / 30000.0, 0.6, 1.0)
     warm = np.select([typ == T_OLD, typ == T_NEW, typ == T_CBD, typ == T_IND], [0.78, 0.62, 0.22, 0.3], 0.6)
     # emergency buildings (hospital generators) seen from the rooftop, bearing ~195 / ~168 deg
@@ -1445,20 +1445,20 @@ def dome_radiance(dirs, el, az, cam_pos, pw):
     return L
 
 
-def draw_sky(R, cam, pw, spacing_px=2.6, energy=1.0):
+def draw_sky(R, cam, pw, spacing_px=2.2, energy=1.0):
     dirs, el, az, u = sky_dots(cam, spacing_px)
     if len(dirs) == 0:
         return
     L = dome_radiance(dirs, el, az, cam.pos, pw)
     # pointillist stipple: a fine grain of dots with mild brightness spread + rare complementary flecks
-    m = 0.55 + 0.9 * u
+    m = 0.7 + 0.6 * u
     h = hash01(np.arange(len(u)) + 7, 54)
     tint = np.ones((len(u), 3))
     tint[h < 0.05] = [0.85, 0.9, 1.3]
     tint[(h > 0.95)] = [1.15, 1.05, 0.8]
     # energy per dot = radiance * the solid angle it stands for (px^2 @1920)
     E = L * (m[:, None] * tint) * (spacing_px ** 2)
-    R.draw_dirs(cam, dirs, E.astype(np.float32), size_px=1.0, energy=energy)
+    R.draw_dirs(cam, dirs, E.astype(np.float32), size_px=0.85, energy=energy)
 
 
 def _twinkle(n_idx, tg, el, amp=0.22):
@@ -1670,7 +1670,7 @@ def draw_lamps(R, cam, zb, pw, energy=1.0, pools=True):
                     # near pools: a stipple of dots on the asphalt (true perspective, pointillist)
                     bi = np.nonzero(m)[0][big]
                     area_px = np.pi * r1920[bi] ** 2 * sin_el[bi]
-                    nd = np.clip((area_px / 26.0).astype(np.int64), 4, 60)
+                    nd = np.clip((area_px / 14.0).astype(np.int64), 4, 90)
                     tot = int(nd.sum())
                     rep = np.repeat(np.arange(len(bi)), nd)
                     kid = np.arange(tot) - np.repeat(np.cumsum(nd) - nd, nd)
@@ -1687,7 +1687,7 @@ def draw_lamps(R, cam, zb, pw, energy=1.0, pools=True):
                     # each dot carries (pool radiance) x (its share of the pool's screen area)
                     share = (area_px[rep] * 1.9 / nd[rep]) * fall * (0.6 + 0.8 * hash01(gid, 88))
                     Eq = Ek[big][rep] * (POOL_L * share * np.exp(-dq / HAZE_L))[:, None] * _warm(dq)
-                    sz = np.clip(np.sqrt(area_px[rep] / nd[rep]) * 0.35, 0.8, 3.0)
+                    sz = np.clip(np.sqrt(area_px[rep] / nd[rep]) * 0.25, 0.7, 1.8)
                     _splat(R, xq[mq], yq[mq], sz[mq], (Eq[mq] * energy).astype(np.float32), soft=True)
 
 
@@ -1997,11 +1997,11 @@ def env_lights(tg=None, pw=None):
     pw = pw or power(tg)
     g = pw["glow"]
     lights = [
-        Light("dir", hex_lin("#FFB27A"), 0.050 * g, vec=(0.1, 1.0, 0.25), wrap=0.9),     # the orange lid
-        Light("dir", hex_lin("#FF9F5A"), 0.040 * g, vec=(0.15, 0.25, 1.0), wrap=0.6),    # city glow (south)
-        Light("amb", hex_lin("#FFB080"), 0.008 * g),
-        Light("dir", hex_lin("#9FB8FF"), 0.004 + 0.010 * pw["stars"], vec=(-0.2, 1.0, 0.3), wrap=0.8),  # starlight
-        Light("amb", hex_lin("#6F86C8"), 0.0015),
+        Light("dir", hex_lin("#FFB27A"), 0.022 * g, vec=(0.1, 1.0, 0.25), wrap=0.9),     # the orange lid
+        Light("dir", hex_lin("#FF9F5A"), 0.016 * g, vec=(0.15, 0.25, 1.0), wrap=0.6),    # city glow (south)
+        Light("amb", hex_lin("#FFB080"), 0.003 * g),
+        Light("dir", hex_lin("#9FB8FF"), 0.003 + 0.010 * pw["stars"], vec=(-0.2, 1.0, 0.3), wrap=0.8),  # starlight
+        Light("amb", hex_lin("#6F86C8"), 0.0012),
     ]
     if pw["lamp"] > 0:
         lights.append(Light("point", BULB, 2.4 * pw["lamp"], vec=LAMP_WORLD, radius=0.25))
@@ -2094,23 +2094,123 @@ def render_env(R, cam, tg, W, H, sky=True, stars=True, city=True, roof=True, gir
         draw_windows(R, cam, zb, pw, energy=city_energy)
         draw_traffic(R, cam, zb, pw, energy=city_energy)
         draw_reflections(R, cam, zb, pw, energy=city_energy)
+        draw_haze(R, cam, zb, pw, energy=city_energy)
     if roof or city:
         draw_bulb(R, cam, zb, pw, energy=city_energy)
     city_img = R.new_layer()
     hdr = sky_img + city_img
     mask = soft_cover
-    if roof or city or girl:
-        parts = []
-        if roof or city:
-            parts.append(_solids(roof, city))
-        if girl:
-            parts.append(girl_cloud(**(girl_pose or {})))
-        cl = SolidCloud.concat(parts) if len(parts) > 1 else parts[0]
-        lights = env_lights(pw=pw)
+    lights = env_lights(pw=pw)
+    if roof or city:
+        cl = _solids(roof, city)
         m = draw_solid(R, cam, cl, lights, spacing_px=spacing_px, return_mask=True, energy=solid_energy,
                        rim=(hex_lin("#FFB27A") * 0.02 * pw["glow"] + hex_lin("#8FA8FF") * 0.01 * pw["stars"], 3.0, 1.0),
-                       seurat=0.6, p_min=0.06, flecks=(hex_lin("#4A5A9A"), 0.05))
+                       seurat=0.6, p_min=0.05, flecks=(hex_lin("#4A5A9A"), 0.05))
         solid_img = R.new_layer()
         hdr = hdr * (1.0 - m)[..., None] + solid_img
         mask = np.maximum(mask, m)
+    if girl:
+        gl = girl_cloud(**(girl_pose or {}))
+        rim_col = hex_lin("#FFC890") * (0.05 * pw["glow"] + 0.05 * pw["lamp"]) + hex_lin("#9FB8FF") * 0.05 * pw["stars"]
+        m = draw_solid(R, cam, gl, lights, spacing_px=1.5, return_mask=True, energy=solid_energy * 1.4,
+                       rim=(rim_col, 2.2, 1.0), seurat=0.4, p_min=0.25)
+        g_img = R.new_layer()
+        hdr = hdr * (1.0 - m)[..., None] + g_img
+        mask = np.maximum(mask, m)
     return hdr, mask
+
+
+# ================================================================================================ haze
+def _build_haze(n=420_000):
+    """Air above the lit city: points whose brightness follows the density of lights below them."""
+    rng = np.random.default_rng(31)
+    Lm, Wd = lamps(), windows()
+    res = 150.0
+    nb = int(2 * CITY_R / res)
+    def hist(P, w):
+        i = np.clip(((P[:, 2] + CITY_R) / res).astype(int), 0, nb - 1)
+        j = np.clip(((P[:, 0] + CITY_R) / res).astype(int), 0, nb - 1)
+        h = np.zeros((nb, nb))
+        np.add.at(h, (i, j), w)
+        return h
+    import cv2
+    dens = hist(Lm["P"], Lm["E"].astype(np.float64).sum(1) * 3.0) + hist(Wd["P"][::3], np.full(len(Wd["P"][::3]), 1.2))
+    dens = cv2.GaussianBlur(dens, (0, 0), 2.0)
+    dens /= np.percentile(dens[dens > 0], 99.5)
+    # sample positions proportional to sqrt(density) (brightness carries the rest)
+    pdf = np.sqrt(np.clip(dens, 0, 1.5)).ravel()
+    pdf /= pdf.sum()
+    cell = rng.choice(nb * nb, size=n, p=pdf)
+    ci, cj = cell // nb, cell % nb
+    x = (cj + rng.random(n)) * res - CITY_R
+    z = (ci + rng.random(n)) * res - CITY_R
+    y = rng.exponential(170.0, n) + 8.0
+    lvl = np.clip(dens[ci, cj], 0, 1.5) / np.maximum(np.sqrt(np.clip(dens[ci, cj], 1e-6, 1.5)), 1e-6)
+    lvl *= np.exp(-(y - 8.0) / 260.0)
+    ring = ring_of(np.stack([x, z], 1))
+    hue = rng.random(n)
+    col = np.where(hue[:, None] < 0.7, hex_lin("#FFB070"), hex_lin("#E8D8C8"))
+    return dict(P=np.stack([x, y, z], 1).astype(np.float32), E=(col * lvl[:, None]).astype(np.float32), ring=ring)
+
+
+def haze():
+    if "haze" not in _L:
+        _L["haze"] = _cached("haze", _build_haze)
+    return _L["haze"]
+
+
+HAZE_K = 0.006
+HAZE_RW = 45.0
+
+
+def haze_image(cam, zb, pw, down=4):
+    """Smooth radiance of the lit air (low resolution, HDR per pixel): soft blobs whose brightness
+    follows the lights below them, occluded by the buildings in front."""
+    from ..raster import Accum
+    Hd = haze()
+    W, H = cam.W, cam.H
+    w2, h2 = max(8, W // down), max(4, H // down)
+    P = Hd["P"]
+    x, y, z, coc, ok = cam.project(P)
+    keep = _in_frame(cam, x, y, ok, 60)
+    k = np.nonzero(keep)[0]
+    if len(k) == 0:
+        return np.zeros((h2, w2, 3), np.float32)
+    lv = level(pw["t"], Hd["ring"][k], 0.0)
+    d = z[k].astype(np.float64)
+    f1920 = cam.focal / 36.0 * 1920.0
+    r = HAZE_RW * f1920 / np.maximum(d, 1.0)                  # blob radius, px @1920
+    near_fade = np.clip((d - 150.0) / 500.0, 0, 1)
+    vis = _ztest(zb, x[k], y[k], z[k], 0.02, 20.0) & (lv > 0.003)
+    rr = np.clip(r, 0.8, 90.0)
+    # blob energy in (px@1920)^2 radiance units: radiance ~ E / area
+    E = Hd["E"][k] * (HAZE_K * lv * near_fade * rr ** 2 / (1.0 + d / 6000.0))[:, None]
+    sc = w2 / W                     # low-res px per full-res px
+    s1920 = W / 1920.0              # full-res px per px@1920
+    A = Accum(w2, h2)
+    A.splat((x[k][vis] * sc).astype(np.float32), (y[k][vis] * sc).astype(np.float32),
+            (rr[vis] * s1920 * sc).astype(np.float32), (E[vis] * (s1920 * sc) ** 2).astype(np.float32), soft=True)
+    return A.resolve()
+
+
+def draw_haze(R, cam, zb, pw, energy=1.0, spacing_px=2.4):
+    """The lit air as a stipple: the smooth haze radiance sampled on world-anchored dot directions."""
+    import cv2
+    img = haze_image(cam, zb, pw)
+    if img.max() <= 0:
+        return
+    W, H = cam.W, cam.H
+    dirs, el, az, u = sky_dots(cam, spacing_px, el_min=-np.pi / 2)
+    if len(dirs) == 0:
+        return
+    x, y, c, ok = cam.project_dirs(dirs)
+    m = _in_frame(cam, x, y, ok, 1)
+    x, y, u = x[m], y[m], u[m]
+    big = cv2.resize(img, (W, H), interpolation=cv2.INTER_LINEAR)
+    xi = np.clip(x.astype(np.int64), 0, W - 1)
+    yi = np.clip(y.astype(np.int64), 0, H - 1)
+    L = big[yi, xi].astype(np.float64)
+    mm = 0.55 + 0.9 * u
+    E = L * (mm * spacing_px ** 2)[:, None]
+    live = L.max(axis=1) > 1e-6
+    _splat(R, x[live], y[live], 0.9, (E[live] * energy).astype(np.float32))

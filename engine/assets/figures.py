@@ -190,6 +190,7 @@ class Girl:
         face = sd_round_box(hp.astype(np.float64), (0, -0.050, 0.082), (0.058, 0.078, 0.058), 0.02)
         outer = (np.abs(face) > 0.0035) & ((hp[:, 1] + 0.052) > 0.0035)
         outer &= sd_ellipsoid(hp.astype(np.float64), (0, 0.018, -0.012), (0.068, 0.083, 0.088)) > 0.002
+        outer &= girl_hair_sdf(hp.astype(np.float64)) > -0.004
         hp, hn = hp[outer], hn[outer]
         crown = np.array([0.0, 0.10, -0.03])
         radial = hp - crown
