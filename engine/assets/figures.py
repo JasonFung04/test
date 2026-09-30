@@ -639,3 +639,74 @@ def elder_ik(elder, target_wrist, side="R", lean=0.0, x0=(0.9, 0.1, 0.4)):
         return float(np.sum((wrist(q) - target_wrist) ** 2) + 1e-4 * (q[1] ** 2 + q[2] ** 2))
     r = minimize(cost, np.asarray(x0, float), method="Nelder-Mead", options=dict(xatol=1e-5, fatol=1e-9, maxiter=4000))
     return tuple(r.x), float(np.sqrt(np.sum((wrist(r.x) - target_wrist) ** 2)))
+
+
+# =============================================================================== the girl's hand (ECU)
+def girl_torch_hand(density=1.0):
+    """A child's right hand gripping the small silver flashlight, thumb on the button, with the
+    hoodie sleeve rolled back three times. Local frame: torch axis +y (lens at +y), palm side +x.
+    Returns dict of point arrays per material: skin, torch, lens, sleeve (P, N, area)."""
+    def make():
+        out = {}
+        # flashlight: body + head + knurled ring + lens
+        def torch(p):
+            body = sd_capsule(p, (0, -0.075, 0), (0, 0.035, 0), 0.0135)
+            head = sd_round_cone(p, (0, 0.035, 0), (0, 0.058, 0), 0.0140, 0.0175)
+            d = smin(body, head, 0.004)
+            ring = np.sqrt((np.sqrt(p[:, 0] ** 2 + p[:, 2] ** 2) - 0.0142) ** 2 + (p[:, 1] - 0.030) ** 2) - 0.0015
+            d = smin(d, ring, 0.001)
+            d = smax(d, p[:, 1] - 0.0605, 0.001)
+            btn = sd_ellipsoid(p, (-0.0130, -0.020, 0.0), (0.004, 0.006, 0.004))
+            return smin(d, btn, 0.002)
+        P, N, a = sample_surface(torch, (-0.025, -0.09, -0.025), (0.025, 0.065, 0.025), int(60_000 * density), seed=81)
+        out["torch_P"], out["torch_N"], out["torch_a"] = P, N, np.float32(a)
+        # lens disc at the head
+        rng = np.random.default_rng(82)
+        n = int(6000 * density)
+        r = 0.0158 * np.sqrt(rng.random(n))
+        t = rng.random(n) * 2 * np.pi
+        out["lens_P"] = np.stack([r * np.cos(t), np.full(n, 0.0602), r * np.sin(t)], 1).astype(np.float32)
+        out["lens_N"] = np.tile([0, 1.0, 0], (n, 1)).astype(np.float32)
+        out["lens_a"] = np.float32(np.pi * 0.0158 ** 2 / n)
+
+        # a child's fist: palm on the +x side of the torch, four slim fingers wrapping round it,
+        # thumb resting along the -z side toward the button
+        def hand(p):
+            d = sd_ellipsoid(p, (0.019, -0.030, 0.002), (0.011, 0.031, 0.020))                 # palm
+            for k, yy in enumerate((-0.010, -0.0235, -0.037, -0.0495)):
+                rr = (0.0050, 0.0054, 0.0052, 0.0045)[k]
+                R0 = 0.0135 + rr + 0.0004
+                ths = (-0.35, 0.55, 1.45, 2.25)                                                    # knuckle, PIP, DIP, tip
+                pts = [np.array([R0 * np.cos(t), yy, R0 * np.sin(t)]) for t in ths]
+                pts[0] = np.array([0.021, yy - 0.002, 0.012])
+                for i in range(3):
+                    d = smin(d, sd_round_cone(p, pts[i], pts[i + 1], rr * (1.05 - 0.08 * i), rr * (0.97 - 0.08 * i)),
+                             0.002)
+                d = smin(d, sd_sphere(p, pts[1], rr * 1.08), 0.0015)                              # knuckle bump
+            # thumb
+            d = smin(d, sd_round_cone(p, (0.020, -0.008, -0.013), (0.004, 0.000, -0.0175), 0.0068, 0.0060), 0.003)
+            d = smin(d, sd_round_cone(p, (0.004, 0.000, -0.0175), (-0.009, -0.004, -0.0150), 0.0060, 0.0052), 0.002)
+            # wrist
+            d = smin(d, sd_round_cone(p, (0.021, -0.052, 0.002), (0.030, -0.105, 0.002), 0.017, 0.019), 0.010)
+            return d + 0.0004 * fbm(p * 320.0, octaves=2)
+        P, N, a = sample_surface(hand, (-0.03, -0.13, -0.04), (0.05, 0.01, 0.04), int(120_000 * density), seed=83)
+        out["skin_P"], out["skin_N"], out["skin_a"] = P, N, np.float32(a)
+
+        # sleeve: oversized hoodie cuff rolled three times, around the wrist
+        def sleeve(p):
+            q = p - np.array([0.030, -0.110, 0.0])
+            ax = np.array([0.16, -0.99, 0.0])
+            ax /= np.linalg.norm(ax)
+            h = q @ ax
+            rad = np.linalg.norm(q - np.outer(h, ax), axis=1)
+            tube = np.maximum(rad - 0.034, np.maximum(-h, h - 0.09))
+            d = tube
+            for k in range(3):
+                yy = 0.006 + k * 0.011
+                ring = np.sqrt((rad - 0.035) ** 2 + (h - yy) ** 2) - 0.0072
+                d = smin(d, ring, 0.004)
+            return d + 0.0012 * fbm(p * 90.0, octaves=3)
+        P, N, a = sample_surface(sleeve, (-0.03, -0.22, -0.06), (0.09, -0.08, 0.06), int(80_000 * density), seed=84)
+        out["sleeve_P"], out["sleeve_N"], out["sleeve_a"] = P, N, np.float32(a)
+        return out
+    return _cache(f"girl_torch_hand3_{density}", make)

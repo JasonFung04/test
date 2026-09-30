@@ -13,14 +13,15 @@ import numpy as np
 
 from .. import timeline as TL
 from ..assets import crosshatch as XH
+from ..assets import drawer as DR
 from ..assets import fire as FIRE
 from ..assets import flake as FL
 from ..assets import nebula, sky
 from ..assets.shell import Shell
 from ..config import FPS
 from ..raster import Renderer
-from ..solid import Light, SolidCloud, draw_solid
-from ..camera import Camera, ease, ease5, lerp, seg
+from ..solid import Light, SolidCloud, draw_solid, visibility
+from ..camera import Camera, ease, ease5, handheld, lerp, seg
 from ..color import blackbody, hex_lin
 from ..post import Grade
 from .common import black, dispatch
@@ -300,6 +301,143 @@ def draw_flake(R, cam, tg, lights, spacing=2.2, occlude=True, floor=True):
     return top, cov
 
 
+# ============================================================================ II5 / II7 — the hand
+RHYME_ANCHOR = (0.60, 0.56)            # same screen anchor as the elder's palm in I5 (act1.palm_screen_anchor)
+CRAYON_AXIS = np.array([0.36, 0.80, 0.48])       # tip -> back, flake space (up, right, toward her)
+DORSAL = np.array([0.30, 1.0, -0.30])
+
+
+def hand():
+    return _get("hand", DR.Hand)
+
+
+def hand_pose(tg):
+    """Rm, T of the hand at tg: the crayon tip rides the scheduled stroke path (flake.tip)."""
+    k, q, lift = FL.tip(tg)
+    p = FL.to_flake(q)[0] + np.array([0.004, 0.011, 0.007]) * lift
+    ax = CRAYON_AXIS / np.linalg.norm(CRAYON_AXIS)
+    # the wrist leans a little into each pull (strokes 0-5 pull toward her, 6-8 sweep right)
+    if k >= 0:
+        lean = np.array([0.0, 0.0, 0.10]) if k < 6 else np.array([0.10, 0.0, 0.0])
+        ax = ax + lean
+    ax = ax / np.linalg.norm(ax)
+    # tiny tremor of a living hand
+    ax = ax + np.array([FIRE._n1(tg, 1.7, 21), FIRE._n1(tg, 1.3, 22), FIRE._n1(tg, 1.1, 23)]) * 0.012
+    return hand().placement(p, ax, DORSAL), k, p, lift
+
+
+def _smooth_tip(tg, half=0.7, n=21):
+    ts = np.linspace(tg - half, tg + half, n)
+    w = np.cos(np.linspace(-np.pi / 2, np.pi / 2, n)) ** 2
+    Q = np.array([FL.to_flake(FL.tip(t)[1])[0] for t in ts])
+    return (Q * w[:, None]).sum(0) / w.sum()
+
+
+def hand_camera(tg, W, H, seed):
+    """Over her left shoulder, 100 mm; the view gently follows the crayon; lens shift puts the
+    followed point on the shared hand-rhyme anchor."""
+    centre = np.array([0.0, 0.0, -0.004])
+    follow = centre + 0.55 * (_smooth_tip(tg) - centre)
+    pos = np.array([-0.075, 0.335, 0.245]) + handheld(tg, 0.0012, seed=seed)
+    look = follow + handheld(tg + 3.0, 0.0006, seed=seed + 1)
+    k, q, lift = FL.tip(tg)
+    tipw = FL.to_flake(q)[0]
+    focus = float(np.linalg.norm(pos - tipw))
+    cam = Camera(pos, look, up=(0.0, 1.0, 0.0), focal=100, focus=focus, bokeh=46.0, W=W, H=H)
+    ax, ay = RHYME_ANCHOR[0] * W, RHYME_ANCHOR[1] * H
+    return Camera(pos, look, up=(0.0, 1.0, 0.0), focal=100, focus=focus, bokeh=46.0, W=W, H=H,
+                  shift=((ax - W / 2) / cam.s, -(ay - H / 2) / cam.s))
+
+
+def shadow_on_plane(P, light, res=0.00025, extent=0.10, blur_k=0.02):
+    """Soft shadow of points P (occluders above y=0) cast by a point light onto the plane y=0.
+    Returns a lookup function (x, z) -> darkness 0..1."""
+    Ly = light[1]
+    y = np.clip(P[:, 1], 1e-5, Ly - 1e-3)
+    t = y / (Ly - y)
+    S = P + (P - light) * t[:, None]
+    n = int(2 * extent / res)
+    ix = ((S[:, 0] + extent) / res).astype(np.int64)
+    iz = ((S[:, 2] + extent) / res).astype(np.int64)
+    ok = (ix >= 0) & (ix < n) & (iz >= 0) & (iz < n)
+    grid = np.zeros((n, n), np.float32)
+    np.add.at(grid, (iz[ok], ix[ok]), 1.0)
+    import cv2
+    grid = cv2.GaussianBlur(grid, (0, 0), 2.0)
+    cov = np.clip(grid * 3.0, 0, 1)
+    # penumbra grows with the occluder height (fire is ~15 cm across at ~0.8 m)
+    hmed = float(np.median(y))
+    sig = max(1.0, blur_k * hmed / res * 6.0)
+    cov = cv2.GaussianBlur(cov, (0, 0), sig)
+
+    def look(x, z):
+        jx = np.clip(((x + extent) / res).astype(np.int64), 0, n - 1)
+        jz = np.clip(((z + extent) / res).astype(np.int64), 0, n - 1)
+        inside = (np.abs(x) < extent) & (np.abs(z) < extent)
+        return np.where(inside, cov[jz, jx], 0.0)
+    return look
+
+
+def coverage_dof(R, cam, clouds, spacing_px=1.6):
+    """DOF-aware occlusion mask of solid clouds: each visible front-facing sample splats its projected
+    area with its circle of confusion, so defocused edges become soft and semi-transparent."""
+    Rc = Renderer(R.W, R.H)
+    P = np.concatenate([c.P for c in clouds])
+    N = np.concatenate([c.N for c in clouds])
+    A = np.concatenate([np.broadcast_to(c.area, (len(c.P),)) for c in clouds])
+    x, y, z, coc, valid = cam.project(P)
+    V = cam.pos[None, :] - P
+    V /= np.linalg.norm(V, axis=1, keepdims=True)
+    ndv = np.sum(N * V, axis=1)
+    keep = valid & (ndv > -0.05) & (x > -60) & (x < R.W + 60) & (y > -60) & (y < R.H + 60)
+    idx = np.nonzero(keep)[0]
+    native = np.sqrt(A[idx]) * cam.fpx / np.maximum(z[idx], 1e-6)
+    vis = visibility(x[idx], y[idx], z[idx], R.W, R.H, np.clip(native * 1.2 + 1, 1, 12).astype(np.int32))
+    idx, native = idx[vis], native[vis]
+    area_px = native ** 2 * np.clip(ndv[idx], 0.05, 1.0)
+    r = np.sqrt(coc[idx] ** 2 + (np.maximum(native, spacing_px * R.s) * 0.9) ** 2)
+    Rc.acc.splat(x[idx], y[idx], r.astype(np.float32),
+                 np.repeat(area_px[:, None], 3, 1).astype(np.float32))
+    return np.clip(Rc.resolve()[..., 0] * 1.1, 0.0, 1.0)
+
+
+def _drawing_shot(tl, tg, R, W, H, seed):
+    cam = hand_camera(tg, W, H, seed)
+    (Rm, T), k, tipw, lift = hand_pose(tg)
+    hcl, ccl = hand().clouds(Rm, T)
+    fire_pos = FIRE_IN_FLAKE + FIRE.light_offset(tg)
+    lights = fire_lights(tg, FIRE_IN_FLAKE)
+    # the flake, darkened where the hand shades it from the fire
+    top, side, flo, cov = flake().cloud(tg)
+    sh = shadow_on_plane(np.concatenate([hcl.P[::3], ccl.P]).astype(np.float64), fire_pos)
+    dark = sh(top.P[:, 0].astype(np.float64), top.P[:, 2].astype(np.float64))
+    top.albedo *= (1.0 - 0.85 * dark)[:, None].astype(np.float32)
+    dark_f = sh(flo.P[:, 0].astype(np.float64), flo.P[:, 2].astype(np.float64))
+    flo.albedo *= (1.0 - 0.85 * dark_f)[:, None].astype(np.float32)
+    draw_solid(R, cam, SolidCloud.concat([top, side]), lights, spacing_px=2.2, seurat=0.25, p_min=0.35,
+               jitter=0.08, size_var=0.3)
+    draw_solid(R, cam, flo, lights, spacing_px=2.8, seurat=0.0, jitter=0.05, size_var=0.2, energy=0.8)
+    g = ochre_glints(top, cov, cam, fire_pos, tg)
+    if g is not None:
+        R.draw(cam, g[0], g[1], size_px=0.7)
+    bg = R.new_layer()
+    mask = coverage_dof(R, cam, [hcl, ccl])
+    # the hand: dark skin, backlit by the fire -> rim + sheen; the crayon
+    rim = (FIRE.LIGHT * 0.05 * FIRE.flicker(tg), 3.0, 1.0)
+    draw_solid(R, cam, hcl, lights, spacing_px=1.9, seurat=0.55, p_min=0.10, jitter=0.10, spec=(0.35, 18.0),
+               rim=None, size_var=0.3)
+    draw_solid(R, cam, ccl, lights, spacing_px=1.6, seurat=0.3, p_min=0.3, jitter=0.1, spec=(0.25, 12.0))
+    return bg * (1.0 - mask)[..., None] + R.resolve(), Grade(**GRADE_CAVE)
+
+
+def II5(tl, tg, R, W, H):
+    return _drawing_shot(tl, tg, R, W, H, seed=51)
+
+
+def II7(tl, tg, R, W, H):
+    return _drawing_shot(tl, tg, R, W, H, seed=71)
+
+
 # ============================================================================ II8 — the nine lines
 D_MATCH = 100.0 * FL.S_C / (36.0 * XH.MATCH_SPAN)       # camera height that satisfies MATCH_SPAN
 II8_LAST = TL.frame_range("II8")[1] - 1                  # index of the last frame of II8
@@ -341,7 +479,7 @@ def II3(tl, tg, R, W, H):
     return black(W, H), Grade(bloom=0, grain=0, vignette=0)
 
 
-TABLE = {"II1": II1, "II2": II2, "II3": II3, "II8": II8}
+TABLE = {"II1": II1, "II2": II2, "II3": II3, "II5": II5, "II7": II7, "II8": II8}
 
 
 def render(sid, tl, tg, R, W, H):

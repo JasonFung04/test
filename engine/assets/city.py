@@ -289,11 +289,11 @@ _BRIDGES = [(0.12, 11.0), (0.205, 12.0), (0.285, 12.0), (0.335, 13.0), (0.395, 1
             (0.545, 12.0), (0.63, 11.0), (0.72, 11.0), (0.83, 10.0)]
 
 # special buildings: the girl's block and the tall block the III3 camera stands on
-PERCH_C = np.array([-362.0, -1348.0])      # (x, z)
+PERCH_C = np.array([-362.0, -1356.0])      # (x, z)
 SPECIAL = [
     # x, z, a, b, yaw, floors, floor_h, type, tag   (tag 1 = girl's block, 2 = perch)
     (ROOF_ORIGIN[0], ROOF_ORIGIN[2], 12.0, 6.0, ROOF_YAW, 7, 3.0, T_OLD, 1),
-    (PERCH_C[0], PERCH_C[1], 16.0, 7.0, ROOF_YAW, 12, 3.0, T_NEW, 2),
+    (PERCH_C[0], PERCH_C[1], 14.0, 7.0, ROOF_YAW, 13, 3.0, T_NEW, 2),
 ]
 
 
@@ -545,7 +545,23 @@ def _place_buildings(rng, D, dmap, DR, river, smask):
             continue
         a, b, fl, fh, bt = _gen_type(rng, typ, n)
         if did == 1:
+            # the girl's estate stays a homogeneous low-rise carpet around her block (open view south)
             a = np.minimum(a, 21.5)
+            near_girl = np.hypot(C[:, 0] - ROOF_ORIGIN[0], C[:, 1] - ROOF_ORIGIN[2]) < 420.0
+            tw = near_girl & (bt != T_OLD)
+            a[tw], b[tw], fl[tw], bt[tw] = rng.uniform(17, 21.5, tw.sum()), rng.uniform(5.2, 6.6, tw.sum()), 7, T_OLD
+        # the III3 / III5 view corridor south of the girl's roof stays low-rise (the skyline is the CBD
+        # cluster beyond ~1 km and the supertalls at the river bend)
+        rel = C - np.array([ROOF_ORIGIN[0], ROOF_ORIGIN[2]])
+        brg = np.degrees(np.arctan2(rel[:, 0], -rel[:, 1])) % 360
+        dist_g = np.hypot(rel[:, 0], rel[:, 1])
+        corridor = (dist_g < 950.0) & (brg > 138.0) & (brg < 232.0)
+        if typ != T_CBD:
+            tw = corridor & (fl * fh > 22.0)
+            fl = np.where(tw, np.minimum(fl, 7), fl)
+            fh = np.where(tw, 3.0, fh)
+            bt = np.where(tw, np.where(bt == T_NEW, T_OLD, bt), bt)
+            a = np.where(tw & (typ == T_MIX), np.minimum(a, 20.0), a)
         keep = _lookup(dmap, C, DR) == did
         if 0 <= zone < 10:
             keep &= _core_zone(C) == zone
@@ -1606,7 +1622,7 @@ def draw_windows(R, cam, zb, pw, energy=1.0, s_target=2.2):
     _splat(R, x[k][live], y[k][live], size[live], (E[live] * energy).astype(np.float32))
 
 
-POOL_L = 0.16          # peak road radiance under a unit lamp
+POOL_L = 0.07          # peak road radiance under a unit lamp
 
 
 def draw_lamps(R, cam, zb, pw, energy=1.0, pools=True):
@@ -1639,13 +1655,40 @@ def draw_lamps(R, cam, zb, pw, energy=1.0, pools=True):
             rw = 0.85 * ph[pk]
             r1920 = rw * (cam.focal / 36.0 * 1920.0) / np.maximum(zp, 1e-3)     # pool radius, px @1920
             rr = r1920 * np.sqrt(sin_el)                                           # foreshortened blob
-            m = _in_frame(cam, xp, yp, okp, 40) & _ztest(zb, xp, yp, zp, 0.01, 3.0) & (rr > 0.35)
+            m = _in_frame(cam, xp, yp, okp, 60) & _ztest(zb, xp, yp, zp, 0.01, 3.0) & (rr > 0.35)
             if m.any():
-                dp = zp[m].astype(np.float64)
-                # surface radiance is distance independent: energy = L * blob area (only haze dims it)
-                rad = np.minimum(rr[m], 120.0)
-                Ep = E[pk][m] * (POOL_L * 1.57 * rad ** 2 * np.exp(-dp / HAZE_L))[:, None] * _warm(dp)
-                _splat(R, xp[m], yp[m], np.maximum(rad, 0.6), (Ep * energy).astype(np.float32), soft=True)
+                Ek = E[pk][m]
+                big = rr[m] > 2.5
+                # small (distant) pools: one soft blob each; energy = radiance * blob area
+                sm = ~big
+                if sm.any():
+                    dp = zp[m][sm].astype(np.float64)
+                    rad = rr[m][sm]
+                    Ep = Ek[sm] * (POOL_L * 1.57 * rad ** 2 * np.exp(-dp / HAZE_L))[:, None] * _warm(dp)
+                    _splat(R, xp[m][sm], yp[m][sm], np.maximum(rad, 0.6), (Ep * energy).astype(np.float32), soft=True)
+                if big.any():
+                    # near pools: a stipple of dots on the asphalt (true perspective, pointillist)
+                    bi = np.nonzero(m)[0][big]
+                    area_px = np.pi * r1920[bi] ** 2 * sin_el[bi]
+                    nd = np.clip((area_px / 26.0).astype(np.int64), 4, 60)
+                    tot = int(nd.sum())
+                    rep = np.repeat(np.arange(len(bi)), nd)
+                    kid = np.arange(tot) - np.repeat(np.cumsum(nd) - nd, nd)
+                    gid = np.repeat(kk[bi], nd) * 97 + kid
+                    rad_ = np.sqrt(hash01(gid, 86)) * rw[bi][rep] * 1.25
+                    th = hash01(gid, 87) * 2 * np.pi
+                    Q = Pp[bi][rep].copy()
+                    Q[:, 0] += rad_ * np.cos(th)
+                    Q[:, 2] += rad_ * np.sin(th)
+                    fall = np.exp(-(rad_ / (rw[bi][rep] * 0.62)) ** 2)
+                    xq, yq, zq, _, okq = cam.project(Q)
+                    mq = _in_frame(cam, xq, yq, okq) & _ztest(zb, xq, yq, zq, 0.01, 2.0)
+                    dq = zq.astype(np.float64)
+                    # each dot carries (pool radiance) x (its share of the pool's screen area)
+                    share = (area_px[rep] * 1.9 / nd[rep]) * fall * (0.6 + 0.8 * hash01(gid, 88))
+                    Eq = Ek[big][rep] * (POOL_L * share * np.exp(-dq / HAZE_L))[:, None] * _warm(dq)
+                    sz = np.clip(np.sqrt(area_px[rep] / nd[rep]) * 0.35, 0.8, 3.0)
+                    _splat(R, xq[mq], yq[mq], sz[mq], (Eq[mq] * energy).astype(np.float32), soft=True)
 
 
 def _river_mask():
@@ -1774,6 +1817,198 @@ def ground_mask(cam, W, H, far=12000.0):
     dy = (xc[None, :] * cam.right[1] + yc[:, None] * cam.up[1] + cam.fwd[1])
     dn = np.sqrt((xc[None, :] ** 2 + yc[:, None] ** 2 + 1.0))
     return (dy / dn < -max(cam.pos[1], 0.5) / far).astype(np.float32)
+
+
+# ================================================================================================ near solids
+NEAR_R = 330.0          # buildings within this radius of the girl's roof get real surfaces
+CONCRETE_N = np.array([0.30, 0.285, 0.265])
+WALL_N = np.array([0.24, 0.225, 0.21])
+
+
+def _face_points(rng, c, e1, e2, n_out, L1, L2, dens, jitter=0.0):
+    """Uniform samples on a rectangle centred c spanned by unit e1 (half L1) and e2 (half L2)."""
+    area = 4 * L1 * L2
+    n = max(4, int(area * dens))
+    u = rng.uniform(-1, 1, n)
+    v = rng.uniform(-1, 1, n)
+    P = c[None] + (u * L1)[:, None] * e1[None] + (v * L2)[:, None] * e2[None]
+    if jitter:
+        P = P + n_out[None] * rng.normal(0, jitter, (n, 1))
+    return P, np.broadcast_to(n_out, (n, 3)).copy(), area / n, u, v
+
+
+def _box_surface(rng, c, ax, ay, az, hx, hy, hz, dens, top=True):
+    """Oriented box: centre c, unit axes ax (x), ay (up), az; half sizes. Returns P, N, area_per_pt."""
+    Ps, Ns, As = [], [], []
+    faces = [(ax, ay, az, hx, hy, hz), (-ax, ay, az, hx, hy, hz), (az, ay, ax, hz, hy, hx), (-az, ay, ax, hz, hy, hx)]
+    for n, e1, e2, hn, h1, h2 in faces:
+        P, N, a, _, _ = _face_points(rng, c + n * hn, e2, e1, n, h2, h1, dens)
+        Ps.append(P)
+        Ns.append(N)
+        As.append(np.full(len(P), a))
+    if top:
+        P, N, a, _, _ = _face_points(rng, c + ay * hy, ax, az, ay, hx, hz, dens)
+        Ps.append(P)
+        Ns.append(N)
+        As.append(np.full(len(P), a))
+    return np.concatenate(Ps), np.concatenate(Ns), np.concatenate(As)
+
+
+def _build_near():
+    """Surfaces of the buildings around the girl's roof (walls with window recesses, roof decks,
+    parapets, stair enclosures + water tanks, solar heaters, antennas), and her own building's body.
+    Also the clutter boxes for the z-buffer."""
+    L = layout()
+    rng = np.random.default_rng(21)
+    x, z, a, b, yaw = [L["b_" + k].astype(np.float64) for k in ("x", "z", "a", "b", "yaw")]
+    fl, fh, typ, tag = L["b_fl"], L["b_fh"].astype(np.float64), L["b_typ"], L["b_tag"]
+    d = np.hypot(x - ROOF_ORIGIN[0], z - ROOF_ORIGIN[2])
+    sel = np.nonzero(d < NEAR_R)[0]
+    Ps, Ns, As, Cs, Ks = [], [], [], [], []
+    boxes = []
+    up = np.array([0.0, 1.0, 0.0])
+
+    def add(P, N, A, col, kind=0):
+        Ps.append(P)
+        Ns.append(N)
+        As.append(np.broadcast_to(A, (len(P),)))
+        Cs.append(np.broadcast_to(np.asarray(col, np.float64), (len(P), 3)) if np.ndim(col) == 1 else col)
+        Ks.append(np.full(len(P), kind, np.int8))
+
+    for j in sel:
+        c2 = np.array([x[j], z[j]])
+        ux = np.array([np.cos(yaw[j]), 0.0, -np.sin(yaw[j])])
+        uz = np.array([np.sin(yaw[j]), 0.0, np.cos(yaw[j])])       # local +z (south face normal)
+        H = float(fl[j] * fh[j])
+        dd = d[j]
+        dens_w = 2.2 if dd < 160 else 1.1
+        dens_r = 5.0 if dd < 160 else 2.2
+        girl = tag[j] == 1
+        if girl:
+            dens_w = 9.0
+        cc = np.array([c2[0], H * 0.5, c2[1]])
+        # walls with a window grid (dark glass recesses) and floor bands
+        for n, e1, hn, h1 in ((uz, ux, b[j], a[j]), (-uz, ux, b[j], a[j]), (ux, uz, a[j], b[j]), (-ux, uz, a[j], b[j])):
+            P, N, A, u, v = _face_points(rng, cc + n * hn, e1, up, n, h1, H * 0.5, dens_w)
+            s_ = (u * h1)
+            y_ = (v + 1) * H * 0.5
+            wx = np.abs(((s_ / 3.6) % 1.0) - 0.5) < 0.22
+            wy = ((y_ / fh[j]) % 1.0 > 0.35) & ((y_ / fh[j]) % 1.0 < 0.85) & (y_ > 1.0)
+            win = wx & wy & (hn > 3.0 if typ[j] == T_OLD else True)
+            col = np.where(win[:, None], WALL_N * 0.35, WALL_N * (0.85 + 0.3 * rng.random((len(P), 1))))
+            add(P, N, A, col, 0)
+        if girl:
+            continue
+        # roof deck + parapet
+        top = np.array([c2[0], H, c2[1]])
+        P, N, A, u, v = _face_points(rng, top, ux, uz, up, a[j], b[j], dens_r)
+        col = CONCRETE_N * (0.75 + 0.5 * rng.random((len(P), 1)))
+        add(P, N, A, col, 1)
+        if typ[j] in (T_OLD, T_MIX):
+            for n, e1, hn, h1 in ((uz, ux, b[j], a[j]), (-uz, ux, b[j], a[j]), (ux, uz, a[j], b[j]), (-ux, uz, a[j], b[j])):
+                P, N, A, _, _ = _face_points(rng, top + n * hn + up * 0.5, e1, up, n, h1, 0.5, dens_r)
+                add(P, N, A, CONCRETE_N * 0.9, 1)
+                P, N, A, _, _ = _face_points(rng, top + n * (hn - 0.12) + up * 1.0, e1, n, up, h1, 0.12, dens_r * 2)
+                add(P, N, A, CONCRETE_N, 1)
+            boxes.append([c2[0], c2[1], ux[0], ux[2], a[j], b[j], H, H + 1.0])
+            # stair enclosures with water tanks: one per ~20 m of slab
+            nst = max(1, int(round(2 * a[j] / 22.0)))
+            for q in range(nst):
+                off = (q - (nst - 1) * 0.5) * (2 * a[j] / nst) + rng.uniform(-2, 2)
+                zoff = rng.uniform(-0.3, 0.3) * b[j]
+                ec = top + ux * off + uz * zoff
+                eh = rng.uniform(2.4, 2.9)
+                P, N, A = _box_surface(rng, ec + up * eh * 0.5, ux, up, uz, 1.8, eh * 0.5, 1.4, dens_r)
+                add(P, N, A, CONCRETE_N * 0.95, 2)
+                boxes.append([ec[0], ec[2], ux[0], ux[2], 1.8, 1.4, H, H + eh])
+                if rng.random() < 0.8:
+                    th_ = rng.uniform(1.0, 1.4)
+                    P, N, A = _box_surface(rng, ec + up * (eh + th_ * 0.5), ux, up, uz, 1.5, th_ * 0.5, 1.2, dens_r)
+                    add(P, N, A, CONCRETE_N * 1.1, 2)
+                    boxes.append([ec[0], ec[2], ux[0], ux[2], 1.5, 1.2, H + eh, H + eh + th_])
+            # solar water heaters (tilted racks) and a TV antenna or two
+            for q in range(rng.integers(1, 4)):
+                sc = top + ux * rng.uniform(-a[j] + 3, a[j] - 3) + uz * rng.uniform(-b[j] + 2.5, b[j] - 2.5)
+                P, N, A = _box_surface(rng, sc + up * 0.8, ux, up, uz, 1.1, 0.6, 0.6, dens_r)
+                add(P, N, A, np.array([0.12, 0.13, 0.15]), 2)
+            for q in range(rng.integers(0, 3)):
+                mc = top + ux * rng.uniform(-a[j] + 1, a[j] - 1) + uz * rng.uniform(-b[j] + 1, b[j] - 1)
+                mh = rng.uniform(3.0, 6.0)
+                n = int(mh * 40)
+                t_ = rng.random(n)
+                P = mc[None] + up[None] * (t_ * mh)[:, None]
+                add(P, np.tile(uz, (n, 1)), 0.004, np.array([0.18, 0.18, 0.2]), 3)
+                for rr in range(3):
+                    yy = mh * (0.7 + 0.1 * rr)
+                    Lr = 0.9 - rr * 0.2
+                    t_ = rng.uniform(-1, 1, 20)
+                    P = mc[None] + up[None] * yy + ux[None] * (t_ * Lr)[:, None]
+                    add(P, np.tile(uz, (20, 1)), 0.004, np.array([0.18, 0.18, 0.2]), 3)
+        else:
+            # towers: machine room on the roof
+            P, N, A = _box_surface(rng, top + up * 2.2, ux, up, uz, min(5.0, a[j] * 0.4), 2.2, min(4.0, b[j] * 0.4), dens_r)
+            add(P, N, A, CONCRETE_N * 0.9, 2)
+            boxes.append([c2[0], c2[1], ux[0], ux[2], min(5.0, a[j] * 0.4), min(4.0, b[j] * 0.4), H, H + 4.4])
+    P = np.concatenate(Ps).astype(np.float32)
+    N = np.concatenate(Ns).astype(np.float32)
+    return dict(P=P, N=N, area=np.concatenate(As).astype(np.float32), alb=np.concatenate(Cs).astype(np.float32),
+                kind=np.concatenate(Ks), boxes=np.array(boxes, np.float64))
+
+
+def near():
+    if "near" not in _L:
+        _L["near"] = _cached("near", _build_near)
+    return _L["near"]
+
+
+def roof_boxes():
+    """The rooftop set's big occluders (stair enclosure + tank, parapets) and her building's body."""
+    c, s = np.cos(ROOF_YAW), np.sin(ROOF_YAW)
+    ux, uz = c, -s
+    out = []
+    for C, Bh in ((rooftop.ENCL_C, rooftop.ENCL_B), (rooftop.TANK_C, rooftop.TANK_B)):
+        w = rooftop.to_world(C, ROOF_ORIGIN, ROOF_YAW)
+        out.append([w[0], w[2], ux, uz, Bh[0], Bh[2], w[1] - Bh[1], w[1] + Bh[1]])
+    for C, Bh in (((0, 0.5, 6.0), (12.0, 0.5, 0.12)), ((0, 0.5, -6.0), (12.0, 0.5, 0.12)),
+                  ((12.0, 0.5, 0), (0.12, 0.5, 6.0)), ((-12.0, 0.5, 0), (0.12, 0.5, 6.0))):
+        w = rooftop.to_world(np.array(C), ROOF_ORIGIN, ROOF_YAW)
+        out.append([w[0], w[2], ux, uz, Bh[0], Bh[2], w[1] - Bh[1], w[1] + Bh[1]])
+    out.append([ROOF_ORIGIN[0], ROOF_ORIGIN[2], ux, uz, ROOF_HALF[0], ROOF_HALF[1], 0.0, ROOF_ORIGIN[1] - 0.05])
+    return np.array(out, np.float64)
+
+
+_ROOF = {}
+
+
+def roof_cloud():
+    if "c" not in _ROOF:
+        _ROOF["c"] = rooftop.cloud(ROOF_ORIGIN, ROOF_YAW)
+    return _ROOF["c"]
+
+
+BULB = hex_lin("#FFB870")        # a bare 40 W incandescent bulb
+
+
+def env_lights(tg=None, pw=None):
+    """solid.Light list for anything standing on/near the girl's roof at time tg (characters, props):
+    the orange lid (sky glow, from above), city glow from the south horizon, the bare bulb, starlight
+    after the blackout, and the substation flash."""
+    from ..solid import Light
+    pw = pw or power(tg)
+    g = pw["glow"]
+    lights = [
+        Light("dir", hex_lin("#FFB27A"), 0.050 * g, vec=(0.1, 1.0, 0.25), wrap=0.9),     # the orange lid
+        Light("dir", hex_lin("#FF9F5A"), 0.040 * g, vec=(0.15, 0.25, 1.0), wrap=0.6),    # city glow (south)
+        Light("amb", hex_lin("#FFB080"), 0.008 * g),
+        Light("dir", hex_lin("#9FB8FF"), 0.004 + 0.010 * pw["stars"], vec=(-0.2, 1.0, 0.3), wrap=0.8),  # starlight
+        Light("amb", hex_lin("#6F86C8"), 0.0015),
+    ]
+    if pw["lamp"] > 0:
+        lights.append(Light("point", BULB, 2.4 * pw["lamp"], vec=LAMP_WORLD, radius=0.25))
+    if pw["flash"] > 0 or pw["burn"] > 0:
+        sp = SUBSTATION_POS + np.array([0, 25.0, 0])
+        lights.append(Light("point", hex_lin("#C8E4FF"), 9.0e4 * pw["flash"] + 1.5e3 * pw["burn"], vec=sp, radius=5.0))
+    return lights
 
 
 _GIRL = {}

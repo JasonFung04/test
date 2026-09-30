@@ -9,6 +9,8 @@ Hand frame (right hand): origin at the wrist centre, +y distal (toward the finge
 """
 import numpy as np
 
+from numba import njit, prange
+
 from ..config import CACHE
 from ..noise import fbm, hash01
 from ..sdf import rot, sample_surface, sd_ellipsoid, sd_round_box, sd_round_cone, sd_sphere, smin
@@ -16,11 +18,11 @@ from ..solid import SolidCloud
 
 SKIN = np.array([0.105, 0.058, 0.036], np.float32)        # dark skin (linear albedo)
 SKIN_PALM = np.array([0.23, 0.13, 0.09], np.float32)      # lighter palmar skin
-NAIL = np.array([0.30, 0.19, 0.15], np.float32)
+NAIL = np.array([0.20, 0.13, 0.105], np.float32)
 CRAYON = np.array([0.36, 0.055, 0.025], np.float32)       # red ochre, a little darker than the drawn line
 CRAYON_FACET = np.array([0.46, 0.08, 0.035], np.float32)
 
-HAND_VERSION = 3
+HAND_VERSION = 4
 
 
 def _cache(name, fn):
@@ -42,6 +44,94 @@ def _rz(a):
 
 
 # ------------------------------------------------------------------------------------ sculpting
+@njit(cache=True, inline="always")
+def _smin(a, b, k):
+    if k <= 0.0:
+        return min(a, b)
+    h = min(1.0, max(0.0, 0.5 + 0.5 * (b - a) / k))
+    return b + (a - b) * h - k * h * (1.0 - h)
+
+
+@njit(cache=True, inline="always")
+def _prim(kind, q, x, y, z):
+    if kind == 0:                                   # round cone a->b, r1, r2
+        bax, bay, baz = q[3] - q[0], q[4] - q[1], q[5] - q[2]
+        l2 = bax * bax + bay * bay + baz * baz
+        rr = q[6] - q[7]
+        a2 = l2 - rr * rr
+        il2 = 1.0 / l2
+        pax, pay, paz = x - q[0], y - q[1], z - q[2]
+        yy = pax * bax + pay * bay + paz * baz
+        zz = yy - l2
+        wx, wy, wz = pax * l2 - bax * yy, pay * l2 - bay * yy, paz * l2 - baz * yy
+        x2 = wx * wx + wy * wy + wz * wz
+        y2 = yy * yy * l2
+        z2 = zz * zz * l2
+        sg = 1.0 if rr > 0 else (-1.0 if rr < 0 else 0.0)
+        k = sg * rr * rr * x2
+        sz = 1.0 if zz > 0 else (-1.0 if zz < 0 else 0.0)
+        sy = 1.0 if yy > 0 else (-1.0 if yy < 0 else 0.0)
+        if sz * a2 * z2 > k:
+            return np.sqrt(x2 + z2) * il2 - q[7]
+        if sy * a2 * y2 < k:
+            return np.sqrt(x2 + y2) * il2 - q[6]
+        return (np.sqrt(max(x2 * a2 * il2, 0.0)) + yy * rr) * il2 - q[6]
+    if kind == 1:                                   # ellipsoid c, r, R (row-major, columns = axes)
+        dx, dy, dz = x - q[0], y - q[1], z - q[2]
+        lx = (dx * q[6] + dy * q[9] + dz * q[12]) / q[3]
+        ly = (dx * q[7] + dy * q[10] + dz * q[13]) / q[4]
+        lz = (dx * q[8] + dy * q[11] + dz * q[14]) / q[5]
+        k0 = np.sqrt(lx * lx + ly * ly + lz * lz)
+        k1 = np.sqrt((lx / q[3]) ** 2 + (ly / q[4]) ** 2 + (lz / q[5]) ** 2)
+        return k0 * (k0 - 1.0) / max(k1, 1e-9)
+    dx, dy, dz = x - q[0], y - q[1], z - q[2]       # sphere
+    return np.sqrt(dx * dx + dy * dy + dz * dz) - q[3]
+
+
+@njit(cache=True)
+def _csg(x, y, z, kinds, prm, ks, subs):
+    d = 1e9
+    for j in range(kinds.shape[0]):
+        di = _prim(kinds[j], prm[j], x, y, z)
+        if j == 0:
+            d = di
+        elif subs[j]:
+            d = -_smin(-d, di, ks[j]) if ks[j] > 0 else max(d, -di)
+        else:
+            d = _smin(d, di, ks[j])
+    return d
+
+
+@njit(cache=True, parallel=True)
+def _csg_many(P, kinds, prm, ks, subs, out):
+    for i in prange(P.shape[0]):
+        out[i] = _csg(P[i, 0], P[i, 1], P[i, 2], kinds, prm, ks, subs)
+
+
+@njit(cache=True, parallel=True)
+def _project(P, kinds, prm, ks, subs, iters, D, G):
+    e = 1e-5
+    for i in prange(P.shape[0]):
+        x, y, z = P[i, 0], P[i, 1], P[i, 2]
+        for it in range(iters + 1):
+            d = _csg(x, y, z, kinds, prm, ks, subs)
+            gx = (_csg(x + e, y, z, kinds, prm, ks, subs) - _csg(x - e, y, z, kinds, prm, ks, subs)) / (2 * e)
+            gy = (_csg(x, y + e, z, kinds, prm, ks, subs) - _csg(x, y - e, z, kinds, prm, ks, subs)) / (2 * e)
+            gz = (_csg(x, y, z + e, kinds, prm, ks, subs) - _csg(x, y, z - e, kinds, prm, ks, subs)) / (2 * e)
+            g2 = max(gx * gx + gy * gy + gz * gz, 1e-12)
+            if it < iters:
+                x -= d * gx / g2
+                y -= d * gy / g2
+                z -= d * gz / g2
+            else:
+                gn = np.sqrt(g2)
+                D[i] = d
+                G[i, 0] = gx / gn
+                G[i, 1] = gy / gn
+                G[i, 2] = gz / gn
+        P[i, 0], P[i, 1], P[i, 2] = x, y, z
+
+
 class Sculpt:
     """Ordered smooth CSG of primitives with a fast surface sampler.
 
@@ -69,6 +159,31 @@ class Sculpt:
             return sd_ellipsoid(p, prm[0], prm[1], prm[2])
         return sd_sphere(p, prm[0], prm[1])
 
+    def pack(self):
+        kinds = np.zeros(len(self.ops), np.int64)
+        prm = np.zeros((len(self.ops), 15))
+        ks = np.zeros(len(self.ops))
+        subs = np.zeros(len(self.ops), np.bool_)
+        for j, (kind, q, k, sub) in enumerate(self.ops):
+            if kind == "cone":
+                kinds[j] = 0
+                prm[j, :8] = np.concatenate([q[0], q[1], [q[2], q[3]]])
+            elif kind == "ell":
+                kinds[j] = 1
+                R = np.eye(3) if q[2] is None else np.asarray(q[2], float)
+                prm[j, :15] = np.concatenate([q[0], q[1], R.ravel()])
+            else:
+                kinds[j] = 2
+                prm[j, :4] = np.concatenate([q[0], [q[1]]])
+            ks[j] = k
+            subs[j] = sub
+        return kinds, prm, ks, subs
+
+    def sdf_fast(self, p):
+        out = np.empty(len(p))
+        _csg_many(np.ascontiguousarray(p, np.float64), *self.pack(), out)
+        return out
+
     def sdf(self, p):
         d = None
         for kind, prm, k, sub in self.ops:
@@ -92,7 +207,8 @@ class Sculpt:
                 areas.append(np.pi * (r1 + r2) * L + 2 * np.pi * (r1 * r1 + r2 * r2))
             elif kind == "ell":
                 r = prm[1]
-                areas.append(4 * np.pi * ((r[0] * r[1]) ** 1.6 + (r[0] * r[2]) ** 1.6 + (r[1] * r[2]) ** 1.6) / 3) ** (1 / 1.6)
+                areas.append(4 * np.pi * (((r[0] * r[1]) ** 1.6 + (r[0] * r[2]) ** 1.6 + (r[1] * r[2]) ** 1.6) / 3)
+                             ** (1 / 1.6))
             else:
                 areas.append(4 * np.pi * prm[1] ** 2)
             items.append((kind, prm))
@@ -118,34 +234,22 @@ class Sculpt:
                 out.append(prm[0] + u * prm[1])
         return np.concatenate(out)
 
-    def sample(self, spacing, seed=0, oversample=3.0, max_seeds=4_000_000):
+    def sample(self, spacing, seed=0, max_seeds=4_000_000):
         rng = np.random.default_rng(seed)
-        est = sum(1 for _ in self.ops)
-        # estimate the union area from a first seed pass
-        P = self._seeds(min(max_seeds, 400_000), rng)
-        area_est = None
-        n_seed = max_seeds
-        P = self._seeds(n_seed, rng)
-        P = P + rng.normal(0, spacing * 0.5, P.shape)
-        f = self.sdf
-        e = 1e-5
-        for _ in range(4):
-            d = f(P)
-            g = np.stack([f(P + [e, 0, 0]) - f(P - [e, 0, 0]), f(P + [0, e, 0]) - f(P - [0, e, 0]),
-                          f(P + [0, 0, e]) - f(P - [0, 0, e])], 1) / (2 * e)
-            P = P - (d / np.maximum(np.sum(g * g, axis=1), 1e-12))[:, None] * g
-        d = f(P)
-        P = P[np.abs(d) < spacing * 0.15]
+        P = self._seeds(max_seeds, rng)
+        P = np.ascontiguousarray(P + rng.normal(0, spacing * 0.5, P.shape))
+        D = np.empty(len(P))
+        G = np.empty_like(P)
+        _project(P, *self.pack(), 4, D, G)
+        ok = np.abs(D) < spacing * 0.15
+        P, G = P[ok], G[ok]
         # voxel thinning: one sample per cell -> even density
         key = np.floor(P / spacing).astype(np.int64)
         kk = (key[:, 0] * 73856093) ^ (key[:, 1] * 19349663) ^ (key[:, 2] * 83492791)
         order = rng.permutation(len(P))
         _, first = np.unique(kk[order], return_index=True)
-        P = P[order[first]]
-        g = np.stack([f(P + [e, 0, 0]) - f(P - [e, 0, 0]), f(P + [0, e, 0]) - f(P - [0, e, 0]),
-                      f(P + [0, 0, e]) - f(P - [0, 0, e])], 1)
-        N = g / (np.linalg.norm(g, axis=1, keepdims=True) + 1e-12)
-        return P.astype(np.float32), N.astype(np.float32), np.float32(spacing * spacing * 0.9)
+        sel = order[first]
+        return P[sel].astype(np.float32), G[sel].astype(np.float32), np.float32(spacing * spacing * 0.9)
 
 
 def _ik2(root, end, l1, l2, bend):
@@ -177,52 +281,62 @@ PHAL = {"index": (0.0370, 0.0220, 0.0175), "middle": (0.0410, 0.0260, 0.0185),
         "ring": (0.0380, 0.0240, 0.0175), "little": (0.0300, 0.0190, 0.0160)}
 RAD = {"index": (0.0092, 0.0084, 0.0076, 0.0068), "middle": (0.0094, 0.0087, 0.0079, 0.0070),
        "ring": (0.0088, 0.0081, 0.0074, 0.0066), "little": (0.0078, 0.0073, 0.0067, 0.0060)}
-THUMB_CMC = np.array([-0.0190, 0.0200, -0.0120])
-THUMB_L = (0.0400, 0.0300, 0.0240)
+THUMB_CMC = np.array([-0.0215, 0.0300, -0.0135])
+THUMB_L = (0.0470, 0.0320, 0.0260)
 THUMB_R = (0.0125, 0.0112, 0.0100, 0.0086)
 CRAYON_R = (0.0006, 0.0034, 0.0047)          # tip, shoulder of the ground point, back end
 CRAYON_LEN = 0.040
+FLEX = {"index": ((40.0, 48.0, 12.0), -5.0), "middle": ((46.0, 54.0, 16.0), 0.0),
+        "ring": ((64.0, 84.0, 42.0), 6.0), "little": ((72.0, 90.0, 48.0), 12.0)}
+
+
+def _fk(name):
+    flex, splay = FLEX[name]
+    Rm = rot("z", np.radians(-splay))
+    pts = [MCP[name]]
+    for k in range(3):
+        Rm = Rm @ rot("x", -np.radians(flex[k]))
+        pts.append(pts[-1] + Rm @ np.array([0.0, PHAL[name][k], 0.0]))
+    return pts
 
 
 def grip():
-    """Crayon line and finger chains for the tripod grip (all in the hand frame)."""
-    K = np.array([-0.0300, 0.1150, -0.0560])                 # pinch point on the crayon axis
-    Wb = np.array([-0.0345, 0.0760, 0.0165])                 # rests in the thumb-index web
-    ax = _unit(Wb - K)                                       # crayon axis: tip -> back
-    tip = K - ax * 0.020
-    # frame around the crayon: n_d points to the back of the hand, n_r to the thumb side
-    n_d = _unit(np.array([0.30, 0.25, 1.0]) - ax * (ax @ _unit([0.30, 0.25, 1.0])))
+    """Chalk-like pinch: crayon between the thumb, index and middle pads (hand frame)."""
+    ch = {n: _fk(n) for n in ("index", "middle", "ring", "little")}
+    ip, mp = ch["index"], ch["middle"]
+    di = _unit(ip[3] - ip[2])
+    dm = _unit(mp[3] - mp[2])
+    ax = -_unit(di + dm)                                     # crayon axis (tip -> back) ~ along the pads
+    # pads (palmar side of the distal phalanges)
+    pal_i = _unit(np.cross(di, [1.0, 0.0, 0.0]))
+    pal_i = pal_i if pal_i[2] < 0 else -pal_i
+    pad_i = ip[3] * 0.7 + ip[2] * 0.3 + pal_i * RAD["index"][3]
+    pad_m = mp[3] * 0.7 + mp[2] * 0.3 + np.array([-1.0, 0.0, 0.0]) * RAD["middle"][3]
+    K = (pad_i + pad_m) * 0.5
+    # push the axis off both pads by the crayon radius (it sits in the groove between them)
+    for _ in range(8):
+        for pts, rad in ((ip, RAD["index"]), (mp, RAD["middle"])):
+            a, b = pts[2], pts[3]
+            ab = b - a
+            t = np.clip(((K - a) @ ab) / (ab @ ab), 0, 1)
+            c = a + t * ab
+            dv = K - c
+            dist = np.linalg.norm(dv)
+            need = rad[3] + 0.0040
+            if dist < need:
+                K = c + dv / (dist + 1e-12) * need
+    # make sure the crayon clears both pads by its radius
+    tip = K - ax * 0.019
+    n_d = _unit(np.array([0.2, 0.2, 1.0]) - ax * (ax @ _unit([0.2, 0.2, 1.0])))
     n_r = np.cross(ax, n_d)
     if n_r[0] > 0:
         n_r = -n_r
-    ch = {}
-    # index: distal phalanx lies along the crayon, on top of it
-    ri = RAD["index"]
-    itip = K - ax * 0.003 + _unit(n_d * 0.85 - n_r * 0.15) * (ri[3] + 0.0036)
-    idip = itip + _unit(ax * 0.93 + n_d * 0.37) * PHAL["index"][2]
-    ipip = _ik2(MCP["index"], idip, PHAL["index"][0], PHAL["index"][1], [0.0, 0.25, 1.0])
-    ch["index"] = [MCP["index"], ipip, idip, itip]
-    # middle: supports the crayon from below (its radial side)
-    rm = RAD["middle"]
-    mtip = K + ax * 0.004 + _unit(-n_d * 0.75 + n_r * 0.05 + np.array([0.5, 0.0, 0.0])) * (rm[3] + 0.0038)
-    mdip = mtip + _unit(np.array([0.10, -0.15, 0.30]) + ax * 0.9) * PHAL["middle"][2]
-    mpip = _ik2(MCP["middle"], mdip, PHAL["middle"][0], PHAL["middle"][1], [0.0, 0.6, 0.8])
-    ch["middle"] = [MCP["middle"], mpip, mdip, mtip]
-    # thumb: pad presses the crayon from the radial side, slightly below the index pad
-    rt = THUMB_R
-    ttip = K + ax * 0.002 + _unit(n_r * 0.9 - n_d * 0.2) * (rt[3] + 0.0036)
-    tip_dir = _unit(ax * 0.55 + n_r * 0.55 + np.array([0.0, -0.3, 0.0]))
-    tip_ip = ttip + tip_dir * THUMB_L[2]
-    tmcp = _ik2(THUMB_CMC, tip_ip, THUMB_L[0], THUMB_L[1], [-1.0, -0.3, 0.2])
+    # thumb: its pad presses the crayon from the radial side, opposite the middle finger
+    ttip = K + ax * 0.001 + _unit(n_r * 0.85 - n_d * 0.35) * (THUMB_R[3] + 0.0038)
+    tdir = _unit(ax * 0.35 + n_r * 0.75 + n_d * 0.15)
+    tip_ip = ttip + tdir * THUMB_L[2]
+    tmcp = _ik2(THUMB_CMC, tip_ip, THUMB_L[0], THUMB_L[1], [-1.0, -0.2, 0.3])
     ch["thumb"] = [THUMB_CMC, tmcp, tip_ip, ttip]
-    # ring and little: curled into the palm (forward kinematics)
-    for name, flex, splay in (("ring", (62.0, 86.0, 44.0), 5.0), ("little", (70.0, 92.0, 50.0), 12.0)):
-        Rm = rot("z", np.radians(-splay))
-        pts = [MCP[name]]
-        for k in range(3):
-            Rm = Rm @ rot("x", -np.radians(flex[k]))
-            pts.append(pts[-1] + Rm @ np.array([0.0, PHAL[name][k], 0.0]))
-        ch[name] = pts
     return dict(K=K, ax=ax, tip=tip, n_d=n_d, n_r=n_r, chains=ch)
 
 
