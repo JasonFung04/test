@@ -124,7 +124,7 @@ def scene():
     xs3, _ = p0.text(TL.SENDING, 60, 525, "mono", 54, GOLD * 1.1, times=_times("sending"), step=1.2, seed=4)
     # ---- credit panes
     creds = []
-    pos = [(1.55, 0.06, -0.40), (2.78, -0.12, -1.02), (4.00, 0.05, -1.64)]
+    pos = [(1.55, 0.06, -0.40), (2.78, -0.12, -1.02), (4.00, 0.05, -1.64), (5.22, -0.10, -2.26)]
     for k, (name, cn, en) in enumerate(TL.CREDIT_LINES):
         pc = Pane(pos[k], (980, 330), yaw=-0.21)
         pc.frame()
@@ -294,18 +294,23 @@ def O4(tl, tg, R, W, H):
     S = scene()
     creds = S["creds"]
     # dwell on each pane while it types, glide between them (one continuous move)
-    keys_t = [10.5, 11.0, 12.9, 13.55, 15.0, 15.6, 17.5]
-    keys_i = [-0.45, -0.05, 0.12, 1.0, 1.12, 2.0, 2.2]      # fractional pane index
+    n = len(creds)
+    ft = list(TL.CREDIT_T)
+    keys_t, keys_i = [10.5], [-0.45]
+    for k in range(n):
+        keys_t += [ft[k], (ft[k + 1] - 0.5) if k + 1 < n else 17.5]
+        keys_i += [float(k), float(k) + 0.12]
+    keys_t.append(17.6)
+    keys_i.append(n - 1 + 0.2)
     fi = float(np.interp(tg, keys_t, keys_i))
-    # smooth the piecewise-linear index with an ease inside each glide
-    for a_, b_ in ((12.9, 13.55), (15.0, 15.6)):
+    for k in range(n - 1):
+        a_, b_ = ft[k + 1] - 0.5, ft[k + 1]
         if a_ <= tg <= b_:
-            i0 = float(np.interp(a_, keys_t, keys_i))
-            i1 = float(np.interp(b_, keys_t, keys_i))
+            i0, i1 = k + 0.12, k + 1.0
             fi = i0 + (i1 - i0) * ease5((tg - a_) / (b_ - a_))
-    fi_c = np.clip(fi, 0, 2)
+    fi_c = np.clip(fi, 0, n - 1)
     k0 = int(np.floor(fi_c))
-    k1 = min(k0 + 1, 2)
+    k1 = min(k0 + 1, n - 1)
     f = fi_c - k0
     c = creds[k0].c * (1 - f) + creds[k1].c * f + np.array([0.18 * (fi - fi_c), 0, 0])
     cam_pos = c + np.array([-0.30, 0.03, 1.28])

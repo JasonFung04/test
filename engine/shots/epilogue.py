@@ -265,10 +265,10 @@ CREDIT_CARDS = [
 
 
 def consultant_lines():
-    lines = [("剧本医生　Fable", "serif", 28, "#EDE7DB", 0.36, 0.08),
-             ("Script Doctor", "garamond_it", 22, "#A9A194", 0.42, 0.02)]
-    y = 0.52
-    for name, cn, en in TL.CREDIT_LINES[1:]:
+    rest = TL.CREDIT_LINES[1:]
+    lines = []
+    y = 0.50 - 0.08 * (len(rest) - 1)
+    for name, cn, en in rest:
         lines.append((f"{cn}　{name.capitalize()}", "serif", 28, "#EDE7DB", y, 0.08))
         lines.append((en.title(), "garamond_it", 22, "#A9A194", y + 0.06, 0.02))
         y += 0.16

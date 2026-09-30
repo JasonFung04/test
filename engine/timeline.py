@@ -50,12 +50,16 @@ CARDS = [
 # ---------------------------------------------------------------- opening typing
 PROMPT_CN = "# 写一束光。"
 PROMPT_EN = "# write a light."
-CREDIT_LINES = [
-    ("claude opus 5.5", "编剧 · 导演 · 渲染 · 配乐", "written · directed · rendered · scored"),
-    ("gemini", "科学顾问", "science consultant"),
-    ("grok", "剧本顾问", "script consultant"),
+# Credits name ONLY tools that actually contributed. Gemini / Grok join when their consultant notes
+# come back and are adopted (film/consult/README.md): set active=True and re-render the opening + credits.
+CREDITS = [
+    dict(name="claude opus 5.5", cn="编剧 · 导演 · 渲染 · 配乐", en="written · directed · rendered · scored", active=True),
+    dict(name="fable", cn="剧本医生", en="script doctor", active=True),
+    dict(name="gemini", cn="科学顾问", en="science consultant", active=False),
+    dict(name="grok", cn="剧本顾问", en="script consultant", active=False),
 ]
-CREDIT_T = [11.0, 13.4, 15.4]
+CREDIT_LINES = [(c["name"], c["cn"], c["en"]) for c in CREDITS if c["active"]]
+CREDIT_T = {1: [11.2], 2: [11.0, 14.0], 3: [11.0, 13.4, 15.4], 4: [10.9, 12.5, 14.0, 15.5]}[len(CREDIT_LINES)]
 STATS = "points of light 11,407,288"
 SENDING = "sending"
 

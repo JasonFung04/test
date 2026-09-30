@@ -2343,3 +2343,247 @@ def draw_substation(R, cam, zb, pw, energy=1.0):
         if m.any():
             d = z[m].astype(np.float64)
             _splat(R, x[m], y[m], 0.9, (Es[m] * _atten(d)[:, None] * energy).astype(np.float32))
+
+
+# ================================================================================================ the crowd
+# People who came up to the roofs when the lights went out: simple, varied human shapes (point
+# clouds from analytic capsules/ellipsoids), heads tilted back, lit only by the sky.
+def _cap(rng, a, b, r0, r1, dens):
+    """Points on a tapered capsule a->b (radii r0 -> r1) with outward normals."""
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    ax = b - a
+    L = np.linalg.norm(ax) + 1e-9
+    t_ = ax / L
+    ref = np.array([1.0, 0, 0]) if abs(t_[0]) < 0.9 else np.array([0, 1.0, 0])
+    u_ = np.cross(t_, ref)
+    u_ /= np.linalg.norm(u_)
+    v_ = np.cross(t_, u_)
+    rm = 0.5 * (r0 + r1)
+    area = 2 * np.pi * rm * L + 2 * np.pi * (r0 * r0 + r1 * r1)
+    n = max(6, int(area * dens))
+    k = rng.random(n)
+    cylf = (2 * np.pi * rm * L) / area
+    th = rng.random(n) * 2 * np.pi
+    P = np.empty((n, 3))
+    N = np.empty((n, 3))
+    cyl = k < cylf
+    s = rng.random(n)
+    rr = r0 + (r1 - r0) * s
+    dirs = np.cos(th)[:, None] * u_[None] + np.sin(th)[:, None] * v_[None]
+    P[cyl] = a[None] + (s[cyl] * L)[:, None] * t_[None] + dirs[cyl] * rr[cyl, None]
+    N[cyl] = dirs[cyl]
+    cap = ~cyl
+    sph = rng.normal(0, 1, (cap.sum(), 3))
+    sph /= np.linalg.norm(sph, axis=1, keepdims=True)
+    end = (rng.random(cap.sum()) < r1 * r1 / (r0 * r0 + r1 * r1))
+    ctr = np.where(end[:, None], b[None], a[None])
+    rad = np.where(end, r1, r0)
+    # keep only the outward half of each end sphere
+    out = np.where(end, sph @ t_, -(sph @ t_))
+    sph = np.where((out < 0)[:, None], sph - 2 * out[:, None] * np.where(end[:, None], t_[None], -t_[None]), sph)
+    P[cap] = ctr + sph * rad[:, None]
+    N[cap] = sph
+    return P, N, area / n
+
+
+def _ell(rng, c, r, dens, Rm=None):
+    c = np.asarray(c, float)
+    r = np.asarray(r, float)
+    area = 4 * np.pi * (((r[0] * r[1]) ** 1.6 + (r[0] * r[2]) ** 1.6 + (r[1] * r[2]) ** 1.6) / 3) ** (1 / 1.6)
+    n = max(6, int(area * dens))
+    s = rng.normal(0, 1, (n, 3))
+    s /= np.linalg.norm(s, axis=1, keepdims=True)
+    P = s * r[None]
+    N = s / r[None]
+    N /= np.linalg.norm(N, axis=1, keepdims=True)
+    if Rm is not None:
+        P = P @ Rm.T
+        N = N @ Rm.T
+    return P + c[None], N, area / n
+
+
+def _rotx(a):
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+
+
+POSES = ("down", "pockets", "point", "hips", "crossed", "phone", "hold", "lean")
+
+
+def figure(seed, height=1.68, pose="down", head_up=0.6, skirt=False, long_hair=False, bulk=1.0, dens=1600.0,
+           child=False, arm_up=1.0):
+    """One person in figure space (feet at the origin, +y up, +z the way they face). SolidCloud."""
+    from ..solid import SolidCloud
+    rng = np.random.default_rng(seed)
+    s = height / 1.70
+    Ps, Ns, As, Cs = [], [], [], []
+    skin = np.array([0.46, 0.33, 0.25]) * rng.uniform(0.7, 1.1)
+    cloth = np.array([rng.uniform(0.03, 0.22), rng.uniform(0.03, 0.2), rng.uniform(0.04, 0.24)])
+    pants = np.array([0.04, 0.045, 0.06]) * rng.uniform(0.6, 1.6)
+    hair = np.array([0.02, 0.018, 0.016])
+
+    def add(res, col):
+        P, N, a = res
+        Ps.append(P)
+        Ns.append(N)
+        As.append(np.full(len(P), a))
+        Cs.append(np.broadcast_to(np.asarray(col, float), P.shape))
+
+    lean = -0.06 * head_up                      # people looking up lean back a little
+    Rl = _rotx(lean)
+    piv = np.array([0, 0.9 * s, 0])
+
+    def L_(p):
+        return (np.asarray(p, float) * np.array([1, 1, 1]) - piv) @ Rl.T + piv
+
+    # legs
+    for sx in (1, -1):
+        hip = np.array([0.09 * sx, 0.88, 0.0]) * s
+        knee = np.array([0.095 * sx, 0.48, 0.02]) * s
+        ank = np.array([0.10 * sx, 0.09, 0.0]) * s
+        add(_cap(rng, hip, knee, 0.075 * s * bulk, 0.058 * s, dens), pants)
+        add(_cap(rng, knee, ank, 0.055 * s, 0.042 * s, dens), pants)
+        add(_ell(rng, ank + np.array([0, -0.045, 0.06]) * s, np.array([0.045, 0.04, 0.11]) * s, dens), pants * 0.6)
+    if skirt:
+        add(_cap(rng, np.array([0, 1.0, 0]) * s, np.array([0, 0.55, 0.01]) * s, 0.15 * s, 0.24 * s, dens), cloth)
+    # torso (leaned)
+    tor = [(np.array([0, 0.90, 0]), np.array([0, 1.08, 0.0]), 0.135, 0.13),
+           (np.array([0, 1.08, 0]), np.array([0, 1.33, 0.0]), 0.14, 0.155)]
+    for a_, b_, r0, r1 in tor:
+        P, N, a = _cap(rng, a_ * s, b_ * s, r0 * s * bulk, r1 * s * bulk, dens)
+        P[:, 0] *= 1.28
+        add((L_(P), N @ Rl.T, a), cloth)
+    P, N, a = _cap(rng, np.array([-0.17, 1.39, 0]) * s, np.array([0.17, 1.39, 0]) * s, 0.075 * s * bulk,
+                   0.075 * s * bulk, dens)
+    add((L_(P), N @ Rl.T, a), cloth)
+    P, N, a = _cap(rng, np.array([0, 1.40, 0]) * s, np.array([0, 1.50, 0.01]) * s, 0.05 * s, 0.045 * s, dens)
+    add((L_(P), N @ Rl.T, a), skin)
+    # head, tilted back to look up
+    neck = L_(np.array([0, 1.50, 0.01]) * s)
+    Rh = _rotx(-head_up) @ _rotx(0.0)
+    hc = neck + (np.array([0, 0.105, 0.02]) * s) @ Rh.T
+    P, N, a = _ell(rng, np.zeros(3), np.array([0.085, 0.108, 0.10]) * s, dens * 1.5)
+    face = N[:, 2] > 0.2
+    col = np.where(face[:, None], skin, hair)
+    P = P @ Rh.T + hc
+    N = N @ Rh.T
+    Ps.append(P)
+    Ns.append(N)
+    As.append(np.full(len(P), a))
+    Cs.append(col)
+    if long_hair:
+        P, N, a = _ell(rng, np.array([0, -0.05, -0.06]) * s, np.array([0.10, 0.16, 0.07]) * s, dens)
+        add((P @ Rh.T + hc, N @ Rh.T, a), hair)
+    # arms
+    for sx in (1, -1):
+        sh = L_(np.array([0.19 * sx, 1.38, 0]) * s)
+        if pose == "point" and sx == -1:
+            el_ = sh + np.array([0.02 * sx, 0.26, 0.10]) * s * arm_up + np.array([0.0, -0.3, 0.0]) * s * (1 - arm_up)
+            wr = el_ + np.array([0.0, 0.25, 0.10]) * s * arm_up + np.array([0.0, -0.27, 0.02]) * s * (1 - arm_up)
+        elif pose == "phone" and sx == -1:
+            el_ = sh + np.array([0.02, -0.12, 0.26]) * s * arm_up + np.array([0.02, -0.29, 0.02]) * s * (1 - arm_up)
+            wr = el_ + np.array([-0.08, 0.20, 0.12]) * s * arm_up + np.array([0.0, -0.26, 0.05]) * s * (1 - arm_up)
+        elif pose == "pockets":
+            el_ = sh + np.array([0.05 * sx, -0.29, -0.03]) * s
+            wr = el_ + np.array([-0.02 * sx, -0.18, 0.12]) * s
+        elif pose == "hips":
+            el_ = sh + np.array([0.20 * sx, -0.22, -0.04]) * s
+            wr = el_ + np.array([-0.12 * sx, -0.14, 0.04]) * s
+        elif pose == "crossed":
+            el_ = sh + np.array([0.04 * sx, -0.27, 0.10]) * s
+            wr = el_ + np.array([-0.22 * sx, 0.06, 0.08]) * s
+        elif pose == "hold":
+            el_ = sh + np.array([0.10 * sx, 0.18, 0.05]) * s
+            wr = el_ + np.array([-0.06 * sx, 0.22, -0.02]) * s
+        elif pose == "lean":
+            el_ = sh + np.array([0.06 * sx, -0.20, 0.20]) * s
+            wr = el_ + np.array([-0.02 * sx, -0.05, 0.25]) * s
+        else:
+            el_ = sh + np.array([0.04 * sx, -0.29, 0.0]) * s
+            wr = el_ + np.array([0.01 * sx, -0.26, 0.04]) * s
+        add(_cap(rng, sh, el_, 0.052 * s * bulk, 0.045 * s * bulk, dens), cloth)
+        add(_cap(rng, el_, wr, 0.044 * s * bulk, 0.036 * s, dens), cloth)
+        add(_ell(rng, wr + (wr - el_) / (np.linalg.norm(wr - el_) + 1e-9) * 0.05 * s, np.array([0.035, 0.05, 0.03]) * s,
+                 dens), skin)
+    P = np.concatenate(Ps)
+    N = np.concatenate(Ns)
+    return SolidCloud(P.astype(np.float32), N.astype(np.float32), np.concatenate(Cs).astype(np.float32),
+                      area=np.concatenate(As).astype(np.float32))
+
+
+def _variants(n=32):
+    if "variants" not in _L:
+        rng = np.random.default_rng(55)
+        out = []
+        for k in range(n):
+            kind = rng.random()
+            child = kind < 0.14
+            h = rng.uniform(0.95, 1.35) if child else rng.uniform(1.52, 1.86)
+            pose = rng.choice(["down", "pockets", "point", "hips", "crossed", "down", "pockets"])
+            out.append(figure(1000 + k, height=h, pose=pose, head_up=rng.uniform(0.35, 0.95),
+                              skirt=(not child) and rng.random() < 0.18, long_hair=rng.random() < 0.3,
+                              bulk=rng.uniform(0.9, 1.25), child=child))
+        _L["variants"] = out
+    return _L["variants"]
+
+
+def _crowd_layout():
+    """Positions (x, y, z), yaw, variant, leave-order key of the people on the roofs around her block."""
+    if "crowd" not in _L:
+        L = layout()
+        rng = np.random.default_rng(66)
+        x, z, a, b, yaw = [L["b_" + k].astype(np.float64) for k in ("x", "z", "a", "b", "yaw")]
+        H = L["b_fl"] * L["b_fh"].astype(np.float64)
+        typ, tag = L["b_typ"], L["b_tag"]
+        d = np.hypot(x - ROOF_ORIGIN[0], z - ROOF_ORIGIN[2])
+        sel = np.nonzero((d < 420) & (tag == 0) & (typ != T_IND) & (H < 40))[0]
+        rows = []
+        nv = len(_variants())
+        for j in sel:
+            n = int(rng.integers(2, 14) * (1.3 if d[j] < 200 else 0.8))
+            ux = np.array([np.cos(yaw[j]), -np.sin(yaw[j])])
+            uz = np.array([np.sin(yaw[j]), np.cos(yaw[j])])
+            for q in range(n):
+                if rng.random() < 0.6:        # along the parapet
+                    side = rng.integers(4)
+                    t_ = rng.uniform(-0.9, 0.9)
+                    if side < 2:
+                        p = t_ * a[j] * ux + (1 if side == 0 else -1) * (b[j] - 0.7) * uz
+                    else:
+                        p = t_ * b[j] * uz + (1 if side == 2 else -1) * (a[j] - 0.7) * ux
+                else:
+                    p = rng.uniform(-0.8, 0.8) * a[j] * ux + rng.uniform(-0.7, 0.7) * b[j] * uz
+                P = np.array([x[j] + p[0], H[j], z[j] + p[1]])
+                # face roughly toward the Milky Way (south) with individual variation
+                yw = rng.normal(np.radians(-8.0), 0.9)
+                rows.append([P[0], P[1], P[2], yw, rng.integers(nv), rng.random()])
+        _L["crowd"] = np.array(rows)
+    return _L["crowd"]
+
+
+def crowd_cloud(tg=None, present=1.0, cam=None, max_dist=600.0):
+    """All people still outside (the leave-order key < present) as one world-space SolidCloud."""
+    from ..solid import SolidCloud
+    C_ = _crowd_layout()
+    V = _variants()
+    parts = []
+    for row in C_:
+        if row[5] >= present:
+            continue
+        P0 = row[:3]
+        if cam is not None:
+            v = P0 - cam.pos
+            dist = np.linalg.norm(v)
+            if dist > max_dist or (v @ cam.fwd) < -2.0:
+                continue
+            xc, yc = v @ cam.right, v @ cam.up
+            zc = v @ cam.fwd
+            if abs(xc) > zc * cam.W / cam.fpx * 0.6 + 3 or abs(yc) > zc * cam.H / cam.fpx * 0.6 + 3:
+                continue
+        cl = V[int(row[4])]
+        c, s = np.cos(row[3]), np.sin(row[3])
+        Rm = np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+        parts.append(cl.transformed(Rm, P0))
+    if not parts:
+        return None
+    return SolidCloud.concat(parts)
